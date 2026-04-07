@@ -15,11 +15,13 @@ type Config struct {
 	DBUser     string
 	DBPassword string
 	DBName     string
+	AppPort    string
 }
 
 func LoadConfig() *Config {
 	_ = godotenv.Load()
 
+	appPort := getEnvOrDefault("APP_PORT", "8080")
 	username := os.Getenv("TOWER_USERNAME")
 	password := os.Getenv("TOWER_PASSWORD")
 
@@ -41,6 +43,7 @@ func LoadConfig() *Config {
 		DBUser:     dbUser,
 		DBPassword: dbPassword,
 		DBName:     dbName,
+		AppPort:    appPort,
 	}
 }
 

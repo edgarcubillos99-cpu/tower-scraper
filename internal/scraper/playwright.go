@@ -139,9 +139,10 @@ func (s *TowerScraper) GetTowersData(lat, lon string) ([]models.TowerCoverage, e
 	page.WaitForTimeout(3000)
 
 	log.Println("Mapa cargado con éxito.")
-	page.Screenshot(playwright.PageScreenshotOptions{
-		Path: playwright.String(fmt.Sprintf("mapa_%s_%s.png", lat, lon)),
-	})
+	/*
+		/*page.Screenshot(playwright.PageScreenshotOptions{
+			Path: playwright.String(fmt.Sprintf("mapa_%s_%s.png", lat, lon)),
+		})*/
 
 	log.Println("Mapa cargado. Iniciando extracción de datos...")
 	return s.ExtractCoverageData(page)
