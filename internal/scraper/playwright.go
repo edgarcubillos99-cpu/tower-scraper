@@ -25,7 +25,7 @@ func NewTowerScraper() (*TowerScraper, error) {
 		return nil, fmt.Errorf("no se pudo iniciar Playwright: %v", err)
 	}
 
-	// Usamos chromium en modo headless (ponlo en false si quieres ver cómo se mueve el navegador al desarrollar)
+	// Usamos chromium en modo headless (false para ver el navegador)
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		Headless: playwright.Bool(true),
 	})
@@ -63,7 +63,7 @@ func (s *TowerScraper) Login(username, password string) error {
 	}
 
 	// 2. Llenar el formulario
-	// NOTA: Debes inspeccionar el HTML de TowerCoverage para confirmar los selectores reales ('#Email', '#Password').
+
 	if err := page.Locator("#UserName").Fill(username); err != nil {
 		return fmt.Errorf("error llenando username: %v", err)
 	}
@@ -98,11 +98,6 @@ func (s *TowerScraper) Login(username, password string) error {
 		})
 		return fmt.Errorf("login fallido: posibles credenciales incorrectas, seguimos en la pantalla de login")
 	}
-
-	// --- PARA LA PRUEBA DE EXITO ---
-	page.Screenshot(playwright.PageScreenshotOptions{
-		Path: playwright.String("exito_dashboard.png"),
-	})
 
 	log.Println("Login exitoso. Sesión guardada en el contexto.")
 	return nil
@@ -179,11 +174,10 @@ func (s *TowerScraper) ExtractCoverageData(page playwright.Page) ([]models.Tower
 		page.WaitForTimeout(1500)
 
 		// 3. Extraer el nombre de la torre
-		// El texto dice: "Path Analysis from OSN.Galateo  to New Point↑"
 		titleText, _ := page.Locator("#linkResult tr.collapsible td").InnerText()
 		towerName := cleanTowerName(titleText)
 
-		// 4. Ubicar la fila de PERFORMANCE usando un filtro robusto por texto
+		// 4. Ubicar las filas de PERFORMANCE, CLIENT y TOWER usando un filtro robusto por texto
 		perfRow := page.Locator("#linkResult tr.deetRow").Filter(playwright.LocatorFilterOptions{
 			HasText: "PERFORMANCE",
 		}).Locator("table tr").First()
@@ -193,24 +187,44 @@ func (s *TowerScraper) ExtractCoverageData(page playwright.Page) ([]models.Tower
 		signal, _ := perfRow.Locator("td").Nth(1).InnerText()
 		distanceRaw, _ := perfRow.Locator("td").Nth(2).InnerText()
 
+		// Extraer la fila CLIENT para obtener ALIGNMENT y TILT ---
+		clientRow := page.Locator("#linkResult tr.deetRow").Filter(playwright.LocatorFilterOptions{
+			HasText: "CLIENT",
+		}).Locator("table tr").First()
+
+		alignmentRaw, _ := clientRow.Locator("td").Nth(0).InnerText()
+		tiltRaw, _ := clientRow.Locator("td").Nth(1).InnerText()
+
+		// Extraer la fila TOWER para obtener LOCATION
+		towerRow := page.Locator("#linkResult tr.deetRow").Filter(playwright.LocatorFilterOptions{
+			HasText: "TOWER",
+		}).Locator("table tr").First()
+
+		locationRaw, _ := towerRow.Locator("td").Nth(0).InnerText()
+		lat, lon := parseLocation(locationRaw)
+
 		// 5. Parsear la distancia para obtener el valor numérico en millas
 		milesFloat := extractMiles(distanceRaw)
+		cleanStatus := strings.TrimSpace(status)
 
-		// 6. Aplicar la regla de negocio: Máximo 6 millas
-		if milesFloat > 0 && milesFloat <= 6.0 {
+		// 6. Aplicar la regla de negocio: Máximo 6 millas y Good Link
+		if milesFloat > 0 && milesFloat <= 6.0 && cleanStatus == "Good Link" {
 			tower := models.TowerCoverage{
 				TowerName: towerName,
+				Latitude:  lat,
+				Longitude: lon,
+				Alignment: strings.TrimSpace(alignmentRaw),
+				Tilt:      strings.TrimSpace(tiltRaw),
 				Distance:  fmt.Sprintf("%.2f mi", milesFloat),
 				Signal:    strings.TrimSpace(signal),
-				Status:    strings.TrimSpace(status),
+				Status:    cleanStatus,
 			}
 			results = append(results, tower)
-			log.Printf("✅ APROBADA (<= 6 mi): %s (%.2f mi) | Señal: %s", towerName, milesFloat, tower.Signal)
+			log.Printf("✅ APROBADA: %s | Align: %s, Tilt: %s, Status: %s", towerName, tower.Alignment, tower.Tilt, tower.Status)
 		} else {
-			log.Printf("❌ DESCARTADA (> 6 mi): %s (%.2f mi)", towerName, milesFloat)
+			log.Printf("❌ DESCARTADA (> 6 mi o Status no ideal): %s (%.2f mi, %s)", towerName, milesFloat, cleanStatus)
 		}
 	}
-
 	return results, nil
 }
 
@@ -224,6 +238,21 @@ func cleanTowerName(raw string) string {
 		return strings.TrimSpace(sub[0])
 	}
 	return strings.TrimSpace(raw)
+}
+
+// parseLocation extrae latitud y longitud como texto desde la celda LOCATION (p. ej. "18.46, -66.10").
+func parseLocation(raw string) (lat, lon string) {
+	raw = strings.TrimSpace(strings.ReplaceAll(raw, "\u00a0", " "))
+	re := regexp.MustCompile(`(-?\d+(?:\.\d+)?)\s*[,;/]\s*(-?\d+(?:\.\d+)?)`)
+	if m := re.FindStringSubmatch(raw); len(m) == 3 {
+		return m[1], m[2]
+	}
+	reNums := regexp.MustCompile(`-?\d+(?:\.\d+)?`)
+	parts := reNums.FindAllString(raw, 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return "", ""
 }
 
 func extractMiles(raw string) float64 {

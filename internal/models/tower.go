@@ -5,6 +5,8 @@ type TowerCoverage struct {
 	TowerName string
 	Latitude  string
 	Longitude string
+	Alignment string
+	Tilt      string
 	Distance  string
 	Signal    string
 	Status    string

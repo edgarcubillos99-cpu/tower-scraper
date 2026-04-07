@@ -8,23 +8,46 @@ import (
 )
 
 type Config struct {
-	Username string
-	Password string
+	Username   string
+	Password   string
+	DBHost     string
+	DBPort     string
+	DBUser     string
+	DBPassword string
+	DBName     string
 }
 
 func LoadConfig() *Config {
-	// Intentamos cargar el .env, pero si falla no hay problema (puede estar en prod)
 	_ = godotenv.Load()
 
 	username := os.Getenv("TOWER_USERNAME")
 	password := os.Getenv("TOWER_PASSWORD")
 
 	if username == "" || password == "" {
-		log.Fatal("Faltan credenciales TOWER_EMAIL o TOWER_PASSWORD en el entorno")
+		log.Fatal("Faltan credenciales TOWER_USERNAME o TOWER_PASSWORD en el entorno")
 	}
 
+	dbHost := getEnvOrDefault("DB_HOST", "127.0.0.1")
+	dbPort := getEnvOrDefault("DB_PORT", "3306")
+	dbUser := getEnvOrDefault("DB_USER", "root")
+	dbPassword := getEnvOrDefault("DB_PASSWORD", "")
+	dbName := getEnvOrDefault("DB_NAME", "tower_coverage_db")
+
 	return &Config{
-		Username: username,
-		Password: password,
+		Username:   username,
+		Password:   password,
+		DBHost:     dbHost,
+		DBPort:     dbPort,
+		DBUser:     dbUser,
+		DBPassword: dbPassword,
+		DBName:     dbName,
 	}
+}
+
+// Función auxiliar para mantener limpio el código
+func getEnvOrDefault(key, fallback string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return fallback
 }
