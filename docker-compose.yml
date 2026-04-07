@@ -1,36 +1,17 @@
 services:
-  db:
-    image: mysql:8.0
-    container_name: tower-scraper-db
-    restart: always
-    environment:
-      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
-      MYSQL_DATABASE: ${DB_NAME:-tower_coverage_db}
-    volumes:
-      - db_data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD || exit 1"]
-      interval: 5s
-      timeout: 5s
-      retries: 15
-      start_period: 40s
-
   scraper:
     build: .
     container_name: tower-scraper
     restart: always
-    depends_on:
-      db:
-        condition: service_healthy
     ports:
-      - "${APP_PORT:-8080}:8080"
+      - "${APP_PORT}:${APP_PORT}"
     env_file:
       - .env
     environment:
-      # Hostname del servicio MySQL en la red de Compose (debe coincidir con el nombre del servicio: db)
-      - DB_HOST=db
-      - DB_PORT=3306
-      - DB_USER=root
+      # Desde el contenedor, 127.0.0.1 es el propio contenedor; el MySQL del host se alcanza así:
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
       - MCP_TRANSPORT=${MCP_TRANSPORT}
@@ -39,6 +20,3 @@ services:
       - TOWER_PASSWORD=${TOWER_PASSWORD}
     extra_hosts:
       - "host.docker.internal:host-gateway"
-
-volumes:
-  db_data:
