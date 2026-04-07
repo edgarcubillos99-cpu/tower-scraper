@@ -33,10 +33,10 @@ func main() {
 	lat := "18.465500"
 	lon := "-66.105700"
 
-	err = ts.GetTowersData(lat, lon)
+	torresCercanas, err := ts.GetTowersData(lat, lon)
 	if err != nil {
 		log.Fatalf("Fallo al obtener datos del mapa: %v", err)
 	}
 
-	log.Println("¡Proceso completado! Revisa la captura del mapa generada.")
+	log.Printf("Extracción finalizada. %d torres cumplen con el requisito de distancia.", len(torresCercanas))
 }

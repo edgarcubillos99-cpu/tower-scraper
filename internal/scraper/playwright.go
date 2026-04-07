@@ -3,6 +3,9 @@ package scraper
 import (
 	"fmt"
 	"log"
+	"regexp"
+	"strconv"
+	"strings"
 
 	"tower-scraper/internal/models"
 
@@ -106,12 +109,12 @@ func (s *TowerScraper) Login(username, password string) error {
 }
 
 // GetTowersData navega a la URL del mapa inyectando latitud y longitud.
-func (s *TowerScraper) GetTowersData(lat, lon string) error {
+func (s *TowerScraper) GetTowersData(lat, lon string) ([]models.TowerCoverage, error) {
 	log.Printf("Consultando cobertura para Lat: %s, Lon: %s...", lat, lon)
 
 	page, err := s.context.NewPage()
 	if err != nil {
-		return fmt.Errorf("error creando nueva página: %v", err)
+		return nil, fmt.Errorf("error creando nueva página: %v", err)
 	}
 	defer page.Close()
 
@@ -121,7 +124,7 @@ func (s *TowerScraper) GetTowersData(lat, lon string) error {
 	if _, err = page.Goto(targetURL, playwright.PageGotoOptions{
 		Timeout: playwright.Float(60000),
 	}); err != nil {
-		return fmt.Errorf("error navegando al mapa de cobertura: %v", err)
+		return nil, fmt.Errorf("error navegando al mapa de cobertura: %v", err)
 	}
 
 	log.Println("URL alcanzada, esperando a que el mapa se inicialice...")
@@ -134,7 +137,7 @@ func (s *TowerScraper) GetTowersData(lat, lon string) error {
 	}); err != nil {
 		// Si falla, tomamos captura para ver qué hay en pantalla (ej. un error 404 o sesión expirada)
 		page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String("debug_mapa_failed.png")})
-		return fmt.Errorf("la interfaz del mapa no cargó. Revisa debug_mapa_failed.png: %v", err)
+		return nil, fmt.Errorf("la interfaz del mapa no cargó. Revisa debug_mapa_failed.png: %v", err)
 	}
 
 	// Espera de cortesía para que los pines (marcadores) terminen de dibujarse
@@ -145,59 +148,93 @@ func (s *TowerScraper) GetTowersData(lat, lon string) error {
 		Path: playwright.String(fmt.Sprintf("mapa_%s_%s.png", lat, lon)),
 	})
 
-	return nil
+	log.Println("Mapa cargado. Iniciando extracción de datos...")
+	return s.ExtractCoverageData(page)
 }
 
-// ExtractCoverageData itera sobre los resultados y extrae la información.
+// ExtractCoverageData itera sobre los resultados, extrae la información y filtra por distancia.
 func (s *TowerScraper) ExtractCoverageData(page playwright.Page) ([]models.TowerCoverage, error) {
 	var results []models.TowerCoverage
 
-	// 1. Localizar todas las tarjetas de la columna "Link Results"
-	// Necesitamos el selector que engloba cada una de esas cajitas de la derecha
-	linkCards := page.Locator("TODO_SELECTOR_LINK_CARD")
+	// 1. Localizar todas las imágenes que actúan como tarjetas en la columna "Link Results"
+	linkCards := page.Locator("#linkPanel .linkImg")
 
 	count, err := linkCards.Count()
 	if err != nil {
 		return nil, fmt.Errorf("error contando resultados: %v", err)
 	}
 
-	log.Printf("Se encontraron %d torres en los resultados", count)
+	log.Printf("Se encontraron %d torres en los resultados. Procesando...", count)
 
 	for i := 0; i < count; i++ {
 		card := linkCards.Nth(i)
 
-		// 2. Hacer clic en la tarjeta para que el panel central se actualice
+		// 2. Hacer clic en la tarjeta para actualizar el panel central
 		if err := card.Click(); err != nil {
 			log.Printf("Error haciendo clic en la tarjeta %d: %v", i, err)
 			continue
 		}
 
-		// Pequeña espera para que las animaciones/datos del panel central se refresquen
-		page.WaitForTimeout(1000)
+		// Breve pausa para permitir que JavaScript renderice los nuevos datos en la tabla
+		page.WaitForTimeout(1500)
 
-		// 3. Extraer los datos del panel central
-		// Necesitaremos los selectores exactos (clases o IDs) de los textos en amarillo/blanco
+		// 3. Extraer el nombre de la torre
+		// El texto dice: "Path Analysis from OSN.Galateo  to New Point↑"
+		titleText, _ := page.Locator("#linkResult tr.collapsible td").InnerText()
+		towerName := cleanTowerName(titleText)
 
-		towerName, _ := page.Locator("TODO_SELECTOR_TOWER_NAME").TextContent()
-		distanceStr, _ := page.Locator("TODO_SELECTOR_DISTANCE").TextContent()
-		signal, _ := page.Locator("TODO_SELECTOR_SIGNAL").TextContent()
-		status, _ := page.Locator("TODO_SELECTOR_STATUS").TextContent()
+		// 4. Ubicar la fila de PERFORMANCE usando un filtro robusto por texto
+		perfRow := page.Locator("#linkResult tr.deetRow").Filter(playwright.LocatorFilterOptions{
+			HasText: "PERFORMANCE",
+		}).Locator("table tr").First()
 
-		// Aquí posteriormente agregaremos la lógica en Go para parsear "distanceStr"
-		// (ej: extraer "13.09" de "21.062km 13.09mi") y filtrar si es <= 6 millas.
+		// Extraer columnas: Status (0), Signal (1), Distance (2)
+		status, _ := perfRow.Locator("td").Nth(0).InnerText()
+		signal, _ := perfRow.Locator("td").Nth(1).InnerText()
+		distanceRaw, _ := perfRow.Locator("td").Nth(2).InnerText()
 
-		tower := models.TowerCoverage{
-			TowerName: towerName,
-			Distance:  distanceStr,
-			Signal:    signal,
-			Status:    status,
+		// 5. Parsear la distancia para obtener el valor numérico en millas
+		milesFloat := extractMiles(distanceRaw)
+
+		// 6. Aplicar la regla de negocio: Máximo 6 millas
+		if milesFloat > 0 && milesFloat <= 6.0 {
+			tower := models.TowerCoverage{
+				TowerName: towerName,
+				Distance:  fmt.Sprintf("%.2f mi", milesFloat),
+				Signal:    strings.TrimSpace(signal),
+				Status:    strings.TrimSpace(status),
+			}
+			results = append(results, tower)
+			log.Printf("✅ APROBADA (<= 6 mi): %s (%.2f mi) | Señal: %s", towerName, milesFloat, tower.Signal)
+		} else {
+			log.Printf("❌ DESCARTADA (> 6 mi): %s (%.2f mi)", towerName, milesFloat)
 		}
-
-		results = append(results, tower)
-		log.Printf("Extraído: %+v", tower)
 	}
 
 	return results, nil
+}
+
+// Funciones de ayuda (Helpers) para limpieza de datos
+
+func cleanTowerName(raw string) string {
+	raw = strings.ReplaceAll(raw, "\u00a0", " ") // Limpiar espacios indivisibles (nbsp)
+	parts := strings.Split(raw, "from ")
+	if len(parts) > 1 {
+		sub := strings.Split(parts[1], " to")
+		return strings.TrimSpace(sub[0])
+	}
+	return strings.TrimSpace(raw)
+}
+
+func extractMiles(raw string) float64 {
+	// Busca cualquier número (incluyendo decimales) justo antes de "mi"
+	re := regexp.MustCompile(`([\d\.]+)\s*mi`)
+	matches := re.FindStringSubmatch(raw)
+	if len(matches) > 1 {
+		val, _ := strconv.ParseFloat(matches[1], 64)
+		return val
+	}
+	return 0
 }
 
 // Close limpia los recursos al terminar la aplicación
