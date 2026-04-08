@@ -10,12 +10,8 @@ import (
 type Config struct {
 	Username   string
 	Password   string
-	DBHost     string
-	DBPort     string
-	DBUser     string
-	DBPassword string
-	DBName     string
 	AppPort    string
+	MCPAPIKey  string // Si no está vacía, /sse y /message exigen Authorization: Bearer <valor>
 }
 
 func LoadConfig() *Config {
@@ -29,21 +25,11 @@ func LoadConfig() *Config {
 		log.Fatal("Faltan credenciales TOWER_USERNAME o TOWER_PASSWORD en el entorno")
 	}
 
-	dbHost := getEnvOrDefault("DB_HOST", "127.0.0.1")
-	dbPort := getEnvOrDefault("DB_PORT", "3306")
-	dbUser := getEnvOrDefault("DB_USER", "root")
-	dbPassword := getEnvOrDefault("DB_PASSWORD", "")
-	dbName := getEnvOrDefault("DB_NAME", "tower_coverage_db")
-
 	return &Config{
-		Username:   username,
-		Password:   password,
-		DBHost:     dbHost,
-		DBPort:     dbPort,
-		DBUser:     dbUser,
-		DBPassword: dbPassword,
-		DBName:     dbName,
-		AppPort:    appPort,
+		Username:  username,
+		Password:  password,
+		AppPort:   appPort,
+		MCPAPIKey: os.Getenv("MCP_API_KEY"),
 	}
 }
 

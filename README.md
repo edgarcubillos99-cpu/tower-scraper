@@ -12,7 +12,6 @@ Este proyecto es un microservicio híbrido desarrollado en **Golang**. Actúa co
 
 ✅ Extracción estructurada mediante expresiones regulares (RegEx) y parsing del DOM HTML.
 
-✅ Auto-migración y persistencia asíncrona en base de datos MySQL.
 
 El sistema permite automatizar la consulta de cobertura en TowerCoverage.com inyectando latitud y longitud, parseando las tarjetas de resultados interactivos en el mapa, evaluando la viabilidad del enlace y devolviendo un JSON estructurado con coordenadas, alineación y *tilt* para el equipo de instalación.
 
@@ -61,7 +60,6 @@ tower-scraper/
 │   ├── config/                  → Parseo de variables de entorno (.env)
 │   ├── models/                  → Estructuras de datos principales (TowerCoverage)
 │   ├── scraper/                 → Lógica de Playwright, Login, navegación y selectores HTML
-│   └── storage/                 → Cliente MySQL, auto-migración de tablas e inserción asíncrona
 ├── .env.template                → Plantilla de variables de entorno
 ├── go.mod
 └── go.sum
@@ -91,7 +89,6 @@ F[Extracción DOM HTML + Limpieza RegEx]
        v
 G[Filtro de Negocio: <= 6 millas & "Good Link"]
        |
-       +--> (Asíncrono) --> H[Base de Datos MySQL]
        |
        v
 I[Respuesta JSON al Cliente (A o B)]
@@ -106,6 +103,8 @@ APP_PORT=8080
 
 MCP_TRANSPORT=sse  (Valores admitidos: stdio para uso local CLI, sse para levantar servidor HTTP).
 
+MCP_API_KEY=Token para clientes MCP en modo SSE (header: Authorization: Bearer <valor>).
+
 --------------------------------------------------------
 ### 🔐 CREDENCIALES TOWER COVERAGE
 --------------------------------------------------------
@@ -114,19 +113,7 @@ TOWER_USERNAME=correo@ejemplo.com
 
 TOWER_PASSWORD=password_seguro
 
---------------------------------------------------------
-### 🗄️ CONFIGURACIÓN DE BASE DE DATOS (MySQL)
---------------------------------------------------------
-
-DB_HOST=127.0.0.1
-
-DB_PORT=3306
-
-DB_USER=root
-
-DB_PASSWORD=tu_password
-
-DB_NAME=tower_coverage_db
+----------------------------------------------
 
 ---
 

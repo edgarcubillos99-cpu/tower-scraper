@@ -4,18 +4,13 @@ services:
     container_name: tower-scraper
     restart: always
     ports:
-      - "${APP_PORT}:${APP_PORT}"
+      - "${APP_PORT:-8080}:${APP_PORT:-8080}"
     env_file:
       - .env
     environment:
-      # Desde el contenedor, 127.0.0.1 es el propio contenedor; el MySQL del host se alcanza así:
-      - DB_HOST=${DB_HOST}
-      - DB_PORT=${DB_PORT}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_NAME=${DB_NAME}
-      - MCP_TRANSPORT=${MCP_TRANSPORT}
-      - APP_PORT=${APP_PORT}
+      - MCP_TRANSPORT=${MCP_TRANSPORT:-sse}
+      - APP_PORT=${APP_PORT:-8080}
+      - MCP_API_KEY=${MCP_API_KEY}
       - TOWER_USERNAME=${TOWER_USERNAME}
       - TOWER_PASSWORD=${TOWER_PASSWORD}
     extra_hosts:
