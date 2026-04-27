@@ -470,15 +470,24 @@ func (s *TowerScraper) TestAPCoverage(towerName string, aps []db.APInfo, latClie
 			}
 		}
 
+		// 8) ACCIONAR EL BOTÓN "BeamWidth"
+		beamwidthBtn := page.Locator("#showFilter")
+		if err := beamwidthBtn.Click(); err != nil {
+			log.Printf("[TestAPCoverage AP=%s] fallo paso clic en botón BeamWidth (#showFilter): %v", ap.APName, err)
+		} else {
+			log.Printf("✅ Clic exitoso en BeamWidth para el AP: %s", ap.APName)
+		}
+
+		// Damos un tiempo para que el script ShowBeam() termine de ejecutarse
+		page.WaitForTimeout(2000)
+
 		// ==========================================
-		// ESPERANDO EL BOTÓN "BeamWidth" Y EL RESULTADO
+		// 9) EVALUAR EL RESULTADO (Análisis Visual o del DOM)
 		// ==========================================
 
-		// beamwidthBtn := page.Locator("#BotonBeamWidth")
-		// beamwidthBtn.Click()
-		// (FALTA HTML/LÓGICA DEL ANÁLISIS DE IMAGEN)
+		// (AQUÍ VA LA LÓGICA DE EXTRACCIÓN DEL RESULTADO)
 
-		ap.Status = "Pendiente de inyección"
+		ap.Status = "Pendiente de validación visual"
 		apsValidados = append(apsValidados, ap)
 	}
 
