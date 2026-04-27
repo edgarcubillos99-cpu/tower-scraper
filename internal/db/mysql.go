@@ -4,17 +4,19 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
+	"strings"
 	"tower-scraper/internal/config"
 
 	"github.com/go-sql-driver/mysql"
 )
 
 type APInfo struct {
-	Nombre string
-	Tipo   string
-	Azimut string
-	Tilt   string
-	Altura string
+	APName string `json:"ap_name"`
+	Tipo   string `json:"tipo"`
+	Azimut string `json:"azimut"`
+	Tilt   string `json:"tilt"`
+	Altura string `json:"altura"`
+	Status string `json:"status,omitempty"` // Para marcar si pasó la prueba de cobertura
 }
 
 type DBClient struct {
@@ -52,25 +54,28 @@ func NewDBClient(cfg *config.Config) (*DBClient, error) {
 }
 
 // ObtenerAPsPorTorre cruza la tabla de torres_ap con ap_info
-func (c *DBClient) ObtenerAPsPorTorre(nombreTorre string) ([]APInfo, error) {
+func (c *DBClient) ObtenerAPsPorTorre(nombreTorreTC string) ([]APInfo, error) {
+	nombreLimpio := strings.ReplaceAll(nombreTorreTC, "OSN.", "")
+	nombreLimpio = strings.TrimSpace(nombreLimpio)
 	query := `
 		SELECT a.ap_nombre, a.tipo, a.azimut, a.tilt, a.altura 
-		FROM ap_info a
-		INNER JOIN torres_ap t ON a.ap_nombre = t.ap_nombre
-		WHERE t.nombre_torre = ?
+		FROM dispositivos_ap 
+		WHERE torre_nombre LIKE ?
 	`
-	rows, err := c.conn.Query(query, nombreTorre)
+	// El % permite coincidencias parciales (ej: "OSN.Torre Principal" coincidirá con "Torre Principal")
+	searchParam := "%" + nombreLimpio + "%"
+
+	rows, err := c.conn.Query(query, searchParam)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error consultando APs: %w", err)
 	}
 	defer rows.Close()
 
 	var aps []APInfo
 	for rows.Next() {
 		var ap APInfo
-		if err := rows.Scan(&ap.Nombre, &ap.Tipo, &ap.Azimut, &ap.Tilt, &ap.Altura); err != nil {
-			// Un log detallado aquí sería ideal para monitorear filas corruptas
-			continue
+		if err := rows.Scan(&ap.APName, &ap.Tipo, &ap.Azimut, &ap.Tilt, &ap.Altura); err != nil {
+			continue // Podrías agregar un log de advertencia aquí
 		}
 		aps = append(aps, ap)
 	}

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"tower-scraper/internal/db"
 	"tower-scraper/internal/models"
 
 	"github.com/playwright-community/playwright-go"
@@ -22,6 +23,7 @@ type TowerScraper struct {
 func NewTowerScraper() (*TowerScraper, error) {
 	pw, err := playwright.Run()
 	if err != nil {
+		log.Printf("[NewTowerScraper] fallo al iniciar Playwright: %v", err)
 		return nil, fmt.Errorf("no se pudo iniciar Playwright: %v", err)
 	}
 
@@ -30,6 +32,7 @@ func NewTowerScraper() (*TowerScraper, error) {
 		Headless: playwright.Bool(true),
 	})
 	if err != nil {
+		log.Printf("[NewTowerScraper] fallo al lanzar Chromium: %v", err)
 		return nil, fmt.Errorf("no se pudo lanzar el navegador: %v", err)
 	}
 
@@ -46,12 +49,14 @@ func (s *TowerScraper) Login(username, password string) error {
 	// Creamos un nuevo contexto
 	context, err := s.browser.NewContext()
 	if err != nil {
+		log.Printf("[Login] fallo al crear contexto del navegador: %v", err)
 		return err
 	}
 	s.context = context
 
 	page, err := context.NewPage()
 	if err != nil {
+		log.Printf("[Login] fallo al abrir pestaña de login: %v", err)
 		return err
 	}
 	defer page.Close() // Cerramos esta pestaña al terminar el login
@@ -59,22 +64,24 @@ func (s *TowerScraper) Login(username, password string) error {
 	// 1. Navegar a la página de login
 	loginURL := "https://www.towercoverage.com/Login"
 	if _, err = page.Goto(loginURL); err != nil {
+		log.Printf("[Login] fallo al navegar a la URL de login: %v", err)
 		return fmt.Errorf("error navegando al login: %v", err)
 	}
 
 	// 2. Llenar el formulario
-
 	if err := page.Locator("#UserName").Fill(username); err != nil {
+		log.Printf("[Login] fallo al rellenar usuario: %v", err)
 		return fmt.Errorf("error llenando username: %v", err)
 	}
 	if err := page.Locator("#Password").Fill(password); err != nil {
+		log.Printf("[Login] fallo al rellenar contraseña: %v", err)
 		return fmt.Errorf("error llenando password: %v", err)
 	}
 
 	// 3. Hacer clic en el botón de login y esperar a que la red se estabilice
 	loginBtn := page.Locator(`input[type="submit"][value="Login"]`)
 	if err := loginBtn.Click(); err != nil {
-		// Buena práctica: Tomar captura si falla un paso crítico en modo headless
+		log.Printf("[Login] fallo al hacer clic en el botón Login: %v", err)
 		page.Screenshot(playwright.PageScreenshotOptions{
 			Path: playwright.String("error_login_click.png"),
 		})
@@ -86,13 +93,14 @@ func (s *TowerScraper) Login(username, password string) error {
 	if err := signOutBtn.WaitFor(playwright.LocatorWaitForOptions{
 		State: playwright.WaitForSelectorStateVisible,
 	}); err != nil {
+		log.Printf("[Login] fallo esperando texto \"Sign Out\" (timeout o no visible): %v", err)
 		page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String("error_timeout_login.png")})
 		return fmt.Errorf("el dashboard no cargó a tiempo tras el login: %v", err)
 	}
 
 	// 4. Validar el éxito
-	// Verificamos si seguimos en la URL de login, lo que indicaría un error de credenciales.
 	if page.URL() == loginURL {
+		log.Printf("[Login] fallo de validación: seguimos en la URL de login (credenciales incorrectas o error del servidor)")
 		page.Screenshot(playwright.PageScreenshotOptions{
 			Path: playwright.String("error_credenciales.png"),
 		})
@@ -109,41 +117,35 @@ func (s *TowerScraper) GetTowersData(lat, lon string) ([]models.TowerCoverage, e
 
 	page, err := s.context.NewPage()
 	if err != nil {
+		log.Printf("[GetTowersData] fallo al crear página: %v", err)
 		return nil, fmt.Errorf("error creando nueva página: %v", err)
 	}
 	defer page.Close()
 
 	targetURL := fmt.Sprintf("https://www.towercoverage.com/En-US/Dashboard/LinkPathResult/31710?Lat=%s&Lon=%s&cHgt=0", lat, lon)
 
-	// Aumentamos el tiempo de espera de navegación a 60s porque estos cálculos de mapa son lentos
+	// Aumentamos el tiempo de espera de navegación a 60s
 	if _, err = page.Goto(targetURL, playwright.PageGotoOptions{
 		Timeout: playwright.Float(60000),
 	}); err != nil {
+		log.Printf("[GetTowersData] fallo al navegar al mapa (Lat=%s Lon=%s): %v", lat, lon, err)
 		return nil, fmt.Errorf("error navegando al mapa de cobertura: %v", err)
 	}
 
 	log.Println("URL alcanzada, esperando a que el mapa se inicialice...")
 
-	searchBox := page.Locator("input[placeholder*='Address']") // Busca el input que dice "Address or GPS Coords"
+	searchBox := page.Locator("input[placeholder*='Address']")
 
 	if err := searchBox.WaitFor(playwright.LocatorWaitForOptions{
 		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(45000), // 45 segundos de margen
+		Timeout: playwright.Float(45000),
 	}); err != nil {
-		// Si falla, tomamos captura para ver qué hay en pantalla (ej. un error 404 o sesión expirada)
+		log.Printf("[GetTowersData] fallo esperando el buscador del mapa (input Address): %v", err)
 		page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String("debug_mapa_failed.png")})
 		return nil, fmt.Errorf("la interfaz del mapa no cargó. Revisa debug_mapa_failed.png: %v", err)
 	}
 
-	// Espera de cortesía para que los pines (marcadores) terminen de dibujarse
 	page.WaitForTimeout(3000)
-
-	log.Println("Mapa cargado con éxito.")
-	/*
-		/*page.Screenshot(playwright.PageScreenshotOptions{
-			Path: playwright.String(fmt.Sprintf("mapa_%s_%s.png", lat, lon)),
-		})*/
-
 	log.Println("Mapa cargado. Iniciando extracción de datos...")
 	return s.ExtractCoverageData(page)
 }
@@ -152,11 +154,11 @@ func (s *TowerScraper) GetTowersData(lat, lon string) ([]models.TowerCoverage, e
 func (s *TowerScraper) ExtractCoverageData(page playwright.Page) ([]models.TowerCoverage, error) {
 	var results []models.TowerCoverage
 
-	// 1. Localizar todas las imágenes que actúan como tarjetas en la columna "Link Results"
 	linkCards := page.Locator("#linkPanel .linkImg")
 
 	count, err := linkCards.Count()
 	if err != nil {
+		log.Printf("[ExtractCoverageData] fallo al contar tarjetas #linkPanel .linkImg: %v", err)
 		return nil, fmt.Errorf("error contando resultados: %v", err)
 	}
 
@@ -165,50 +167,62 @@ func (s *TowerScraper) ExtractCoverageData(page playwright.Page) ([]models.Tower
 	for i := 0; i < count; i++ {
 		card := linkCards.Nth(i)
 
-		// 2. Hacer clic en la tarjeta para actualizar el panel central
 		if err := card.Click(); err != nil {
-			log.Printf("Error haciendo clic en la tarjeta %d: %v", i, err)
+			log.Printf("[ExtractCoverageData] fallo al hacer clic en tarjeta %d: %v", i, err)
 			continue
 		}
 
-		// Breve pausa para permitir que JavaScript renderice los nuevos datos en la tabla
 		page.WaitForTimeout(1500)
 
-		// 3. Extraer el nombre de la torre
-		titleText, _ := page.Locator("#linkResult tr.collapsible td").InnerText()
+		titleText, err := page.Locator("#linkResult tr.collapsible td").InnerText()
+		if err != nil {
+			log.Printf("[ExtractCoverageData] fallo al leer título de torre (tarjeta %d): %v", i, err)
+		}
 		towerName := cleanTowerName(titleText)
 
-		// 4. Ubicar las filas de PERFORMANCE, CLIENT y TOWER usando un filtro robusto por texto
 		perfRow := page.Locator("#linkResult tr.deetRow").Filter(playwright.LocatorFilterOptions{
 			HasText: "PERFORMANCE",
 		}).Locator("table tr").First()
 
-		// Extraer columnas: Status (0), Signal (1), Distance (2)
-		status, _ := perfRow.Locator("td").Nth(0).InnerText()
-		signal, _ := perfRow.Locator("td").Nth(1).InnerText()
-		distanceRaw, _ := perfRow.Locator("td").Nth(2).InnerText()
+		status, err := perfRow.Locator("td").Nth(0).InnerText()
+		if err != nil {
+			log.Printf("[ExtractCoverageData] fallo al leer PERFORMANCE status (tarjeta %d, torre %q): %v", i, towerName, err)
+		}
+		signal, err := perfRow.Locator("td").Nth(1).InnerText()
+		if err != nil {
+			log.Printf("[ExtractCoverageData] fallo al leer PERFORMANCE signal (tarjeta %d, torre %q): %v", i, towerName, err)
+		}
+		distanceRaw, err := perfRow.Locator("td").Nth(2).InnerText()
+		if err != nil {
+			log.Printf("[ExtractCoverageData] fallo al leer PERFORMANCE distance (tarjeta %d, torre %q): %v", i, towerName, err)
+		}
 
-		// Extraer la fila CLIENT para obtener ALIGNMENT y TILT ---
 		clientRow := page.Locator("#linkResult tr.deetRow").Filter(playwright.LocatorFilterOptions{
 			HasText: "CLIENT",
 		}).Locator("table tr").First()
 
-		alignmentRaw, _ := clientRow.Locator("td").Nth(0).InnerText()
-		tiltRaw, _ := clientRow.Locator("td").Nth(1).InnerText()
+		alignmentRaw, err := clientRow.Locator("td").Nth(0).InnerText()
+		if err != nil {
+			log.Printf("[ExtractCoverageData] fallo al leer CLIENT alignment (tarjeta %d, torre %q): %v", i, towerName, err)
+		}
+		tiltRaw, err := clientRow.Locator("td").Nth(1).InnerText()
+		if err != nil {
+			log.Printf("[ExtractCoverageData] fallo al leer CLIENT tilt (tarjeta %d, torre %q): %v", i, towerName, err)
+		}
 
-		// Extraer la fila TOWER para obtener LOCATION
 		towerRow := page.Locator("#linkResult tr.deetRow").Filter(playwright.LocatorFilterOptions{
 			HasText: "TOWER",
 		}).Locator("table tr").First()
 
-		locationRaw, _ := towerRow.Locator("td").Nth(0).InnerText()
+		locationRaw, err := towerRow.Locator("td").Nth(0).InnerText()
+		if err != nil {
+			log.Printf("[ExtractCoverageData] fallo al leer TOWER location (tarjeta %d, torre %q): %v", i, towerName, err)
+		}
 		lat, lon := parseLocation(locationRaw)
 
-		// 5. Parsear la distancia para obtener el valor numérico en millas
 		milesFloat := extractMiles(distanceRaw)
 		cleanStatus := strings.TrimSpace(status)
 
-		// 6. Aplicar la regla de negocio: Máximo 6 millas y Good Link
 		if milesFloat > 0 && milesFloat <= 6.0 && cleanStatus == "Good Link" {
 			tower := models.TowerCoverage{
 				TowerName: towerName,
@@ -229,10 +243,8 @@ func (s *TowerScraper) ExtractCoverageData(page playwright.Page) ([]models.Tower
 	return results, nil
 }
 
-// Funciones de ayuda (Helpers) para limpieza de datos
-
 func cleanTowerName(raw string) string {
-	raw = strings.ReplaceAll(raw, "\u00a0", " ") // Limpiar espacios indivisibles (nbsp)
+	raw = strings.ReplaceAll(raw, "\u00a0", " ")
 	parts := strings.Split(raw, "from ")
 	if len(parts) > 1 {
 		sub := strings.Split(parts[1], " to")
@@ -241,7 +253,6 @@ func cleanTowerName(raw string) string {
 	return strings.TrimSpace(raw)
 }
 
-// parseLocation extrae latitud y longitud como texto desde la celda LOCATION (p. ej. "18.46, -66.10").
 func parseLocation(raw string) (lat, lon string) {
 	raw = strings.TrimSpace(strings.ReplaceAll(raw, "\u00a0", " "))
 	re := regexp.MustCompile(`(-?\d+(?:\.\d+)?)\s*[,;/]\s*(-?\d+(?:\.\d+)?)`)
@@ -257,7 +268,6 @@ func parseLocation(raw string) (lat, lon string) {
 }
 
 func extractMiles(raw string) float64 {
-	// Busca cualquier número (incluyendo decimales) justo antes de "mi"
 	re := regexp.MustCompile(`([\d\.]+)\s*mi`)
 	matches := re.FindStringSubmatch(raw)
 	if len(matches) > 1 {
@@ -265,6 +275,214 @@ func extractMiles(raw string) float64 {
 		return val
 	}
 	return 0
+}
+
+// TestAPCoverage navega a Coverages, busca la torre, entra en ella y simula la configuración de sus APs
+func (s *TowerScraper) TestAPCoverage(towerName string, aps []db.APInfo, latCliente, lonCliente string) ([]db.APInfo, error) {
+	log.Printf("Iniciando validación en la torre: %s para %d APs", towerName, len(aps))
+
+	page, err := s.context.NewPage()
+	if err != nil {
+		log.Printf("[TestAPCoverage] fallo paso abrir página: %v", err)
+		return nil, fmt.Errorf("error creando página de validación: %v", err)
+	}
+	defer page.Close()
+
+	// 1. Ir a la vista de Coberturas principal
+	if _, err = page.Goto("https://www.towercoverage.com/En-US/Coverages", playwright.PageGotoOptions{
+		Timeout: playwright.Float(60000),
+	}); err != nil {
+		log.Printf("[TestAPCoverage] fallo paso navegar a Coverages: %v", err)
+		return nil, fmt.Errorf("error navegando a Coverages: %v", err)
+	}
+
+	searchSelector := "input.tablesorter-filter[data-column='1']"
+	searchLocator := page.Locator(searchSelector)
+
+	log.Printf("Buscando la torre en la tabla principal: %s", towerName)
+
+	if err := searchLocator.WaitFor(playwright.LocatorWaitForOptions{
+		State: playwright.WaitForSelectorStateVisible,
+	}); err != nil {
+		log.Printf("[TestAPCoverage] fallo paso esperar filtro de búsqueda de tabla: %v", err)
+		return nil, fmt.Errorf("error esperando input de búsqueda en coverages: %w", err)
+	}
+
+	if err := searchLocator.Fill(towerName); err != nil {
+		log.Printf("[TestAPCoverage] fallo paso escribir nombre de torre en el filtro: %v", err)
+		return nil, fmt.Errorf("error escribiendo en input: %w", err)
+	}
+
+	if err := searchLocator.Press("Enter"); err != nil {
+		log.Printf("[TestAPCoverage] fallo paso Enter en filtro de torre: %v", err)
+	}
+
+	page.WaitForTimeout(1500)
+
+	// 3. Buscar la fila correspondiente a la TORRE
+	rowLocators := page.Locator("tr[role='row']:not(.tablesorter-filter-row)")
+	count, err := rowLocators.Count()
+	if err != nil {
+		log.Printf("[TestAPCoverage] fallo paso contar filas de la tabla (torre %q): %v", towerName, err)
+		return nil, nil
+	}
+	if count == 0 {
+		log.Printf("[TestAPCoverage] fallo paso tabla sin filas de datos para la torre %q", towerName)
+		return nil, nil
+	}
+
+	var selectedRow playwright.Locator
+
+	for i := 0; i < count; i++ {
+		row := rowLocators.Nth(i)
+
+		listNameText, err := row.Locator("td.listName").InnerText()
+		if err != nil {
+			log.Printf("[TestAPCoverage] fallo al leer columna listName (fila %d, torre buscada %q): %v", i, towerName, err)
+			continue
+		}
+
+		listNameText = strings.TrimSpace(listNameText)
+
+		if strings.Contains(strings.ToLower(listNameText), strings.ToLower(towerName)) {
+			if selectedRow == nil {
+				selectedRow = row
+			}
+
+			if strings.HasPrefix(strings.ToUpper(listNameText), "OSN.") {
+				selectedRow = row
+				log.Printf("Coincidencia perfecta de torre encontrada: %s", listNameText)
+				break
+			}
+		}
+	}
+
+	if selectedRow == nil {
+		log.Printf("[TestAPCoverage] fallo paso localizar fila de la torre %q en la tabla (sin coincidencia)", towerName)
+		return nil, nil
+	}
+
+	// 4. Hacer clic para ENTRAR a la configuración de la Torre
+	editLink := selectedRow.Locator("td.listName a").First()
+	if err := editLink.Click(); err != nil {
+		log.Printf("[TestAPCoverage] fallo paso clic en enlace de edición de la torre %q: %v", towerName, err)
+		return nil, fmt.Errorf("error haciendo clic en la torre %s: %w", towerName, err)
+	}
+
+	if err := page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+		State: playwright.LoadStateNetworkidle,
+	}); err != nil {
+		log.Printf("[TestAPCoverage] fallo paso esperar carga de página tras entrar a la torre %q: %v", towerName, err)
+	}
+
+	log.Printf("✅ Hemos ingresado a la configuración de la torre: %s", towerName)
+
+	// ==========================================
+	// 5. BUCLE DE PRUEBAS PARA CADA AP
+	// ==========================================
+	var apsValidados []db.APInfo
+
+	for _, ap := range aps {
+		log.Printf("Prueba de AP -> Nombre: %s | Azimut: %s | Tilt: %s", ap.APName, ap.Azimut, ap.Tilt)
+
+		// 1) Ingresar coordenadas del cliente
+		coordenadas := fmt.Sprintf("%s, %s", latCliente, lonCliente)
+		addressInput := page.Locator("#address")
+
+		if err := addressInput.Fill(coordenadas); err != nil {
+			log.Printf("[TestAPCoverage AP=%s] fallo paso rellenar #address (coordenadas cliente): %v", ap.APName, err)
+			continue
+		}
+
+		searchBtn := page.Locator("input.newbutton[value='Search']")
+		if err := searchBtn.Click(); err != nil {
+			log.Printf("[TestAPCoverage AP=%s] fallo paso clic en Search tras coordenadas: %v", ap.APName, err)
+		}
+		page.WaitForTimeout(1500)
+
+		// 2) Radio System: único select con valor predefinido (índice 1)
+		radioSystemSelect := page.Locator("#RadioSystemList")
+		if _, err := radioSystemSelect.SelectOption(playwright.SelectOptionValues{
+			Indexes: &[]int{1},
+		}); err != nil {
+			log.Printf("[TestAPCoverage AP=%s] fallo paso seleccionar Radio System (#RadioSystemList): %v", ap.APName, err)
+		}
+
+		// 3) Altura en pies: solo si viene de la DB (sin valor por defecto)
+		alturaInput := page.Locator("#AntennaHeightfeet")
+		alturaPies := strings.TrimSpace(ap.Altura)
+		if err := alturaInput.Fill(""); err != nil {
+			log.Printf("[TestAPCoverage AP=%s] fallo paso limpiar altura en pies (#AntennaHeightfeet): %v", ap.APName, err)
+		}
+		if alturaPies != "" {
+			if err := alturaInput.Fill(alturaPies); err != nil {
+				log.Printf("[TestAPCoverage AP=%s] fallo paso rellenar altura en pies: %v", ap.APName, err)
+			}
+			if err := alturaInput.Blur(); err != nil {
+				log.Printf("[TestAPCoverage AP=%s] fallo paso blur en altura en pies: %v", ap.APName, err)
+			}
+		} else {
+			if err := alturaInput.Blur(); err != nil {
+				log.Printf("[TestAPCoverage AP=%s] fallo paso blur en altura en pies (campo vacío en BD): %v", ap.APName, err)
+			}
+		}
+
+		// 4) Azimuth (solo números): solo si hay dato en la DB
+		azimuthInput := page.Locator("#Azimuth")
+		reNumeros := regexp.MustCompile(`[^\d.]`)
+		azimuthLimpio := strings.TrimSpace(reNumeros.ReplaceAllString(ap.Azimut, ""))
+		if err := azimuthInput.Fill(""); err != nil {
+			log.Printf("[TestAPCoverage AP=%s] fallo paso limpiar Azimuth (#Azimuth): %v", ap.APName, err)
+		}
+		if azimuthLimpio != "" {
+			if err := azimuthInput.Fill(azimuthLimpio); err != nil {
+				log.Printf("[TestAPCoverage AP=%s] fallo paso rellenar Azimuth: %v", ap.APName, err)
+			}
+			if err := azimuthInput.Press("Enter"); err != nil {
+				log.Printf("[TestAPCoverage AP=%s] fallo paso Enter en Azimuth: %v", ap.APName, err)
+			}
+		}
+
+		// 5) Beamwidth Filter
+		beamwidthInput := page.Locator("#BeamwidthFilter")
+		if err := beamwidthInput.Fill("90"); err != nil {
+			log.Printf("[TestAPCoverage AP=%s] fallo paso rellenar Beamwidth (#BeamwidthFilter): %v", ap.APName, err)
+		}
+		if err := beamwidthInput.Press("Enter"); err != nil {
+			log.Printf("[TestAPCoverage AP=%s] fallo paso Enter en Beamwidth: %v", ap.APName, err)
+		}
+
+		// ==========================================
+		// NUEVA INTEGRACIÓN: TILT Y SITE TRANSMITTER INFO
+		// ==========================================
+
+		// 6) Tilt (readonly): solo si hay dato en la DB (sin valor por defecto)
+		reTilt := regexp.MustCompile(`[^\d.-]`)
+		tiltLimpio := strings.TrimSpace(reTilt.ReplaceAllString(ap.Tilt, ""))
+		if tiltLimpio != "" {
+			scriptTilt := fmt.Sprintf(`document.getElementById("AntennaDecimalTilt").value = "%s";`, tiltLimpio)
+			if _, err := page.Evaluate(scriptTilt); err != nil {
+				log.Printf("[TestAPCoverage AP=%s] fallo paso inyectar Tilt (#AntennaDecimalTilt): %v", ap.APName, err)
+			}
+		} else {
+			if _, err := page.Evaluate(`document.getElementById("AntennaDecimalTilt").value = "";`); err != nil {
+				log.Printf("[TestAPCoverage AP=%s] fallo paso limpiar Tilt (#AntennaDecimalTilt): %v", ap.APName, err)
+			}
+		}
+
+		// ==========================================
+		// ESPERANDO EL BOTÓN "BeamWidth" Y EL RESULTADO
+		// ==========================================
+
+		// beamwidthBtn := page.Locator("#BotonBeamWidth")
+		// beamwidthBtn.Click()
+		// (FALTA HTML/LÓGICA DEL ANÁLISIS DE IMAGEN)
+
+		ap.Status = "Pendiente de inyección"
+		apsValidados = append(apsValidados, ap)
+	}
+
+	return apsValidados, nil
 }
 
 // Close limpia los recursos al terminar la aplicación
