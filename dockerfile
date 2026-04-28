@@ -13,8 +13,8 @@ RUN go mod download
 # Copiamos el resto del código fuente
 COPY . .
 
-# Compilamos el binario de la aplicación
-RUN go build -o tower-scraper cmd/scraper/main.go
+# Compilamos el binario fuera de /app para que no lo tape un bind mount
+RUN go build -o /usr/local/bin/tower-scraper cmd/scraper/main.go
 
 # Instalamos los navegadores de Playwright y todas las dependencias del SO necesarias (--with-deps)
 RUN go run github.com/playwright-community/playwright-go/cmd/playwright@latest install --with-deps
@@ -27,4 +27,4 @@ ENV MCP_TRANSPORT=sse
 ENV APP_PORT=8080
 
 # Comando de ejecución
-CMD ["./tower-scraper"]
+CMD ["tower-scraper"]

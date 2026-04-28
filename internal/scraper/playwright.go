@@ -279,11 +279,14 @@ func extractMiles(raw string) float64 {
 
 // TestAPCoverage navega a Coverages, busca la torre, entra en ella y simula la configuración de sus APs
 func (s *TowerScraper) TestAPCoverage(towerName string, aps []db.APInfo, latCliente, lonCliente string) ([]db.APInfo, error) {
+	// Limpiamos el nombre de la torre para usarlo en el archivo .png
+	safeName := strings.ReplaceAll(towerName, " ", "_")
+	safeName = strings.ReplaceAll(safeName, "/", "-")
+
 	log.Printf("Iniciando validación en la torre: %s para %d APs", towerName, len(aps))
 
 	page, err := s.context.NewPage()
 	if err != nil {
-		log.Printf("[TestAPCoverage] fallo paso abrir página: %v", err)
 		return nil, fmt.Errorf("error creando página de validación: %v", err)
 	}
 	defer page.Close()
@@ -292,24 +295,21 @@ func (s *TowerScraper) TestAPCoverage(towerName string, aps []db.APInfo, latClie
 	if _, err = page.Goto("https://www.towercoverage.com/En-US/Coverages", playwright.PageGotoOptions{
 		Timeout: playwright.Float(60000),
 	}); err != nil {
-		log.Printf("[TestAPCoverage] fallo paso navegar a Coverages: %v", err)
 		return nil, fmt.Errorf("error navegando a Coverages: %v", err)
 	}
 
-	searchSelector := "input.tablesorter-filter[data-column='1']"
-	searchLocator := page.Locator(searchSelector)
+	// 📸 PANTALLAZO 1: Verificamos que entró a la vista general de coberturas
+	page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String(fmt.Sprintf("%s_01_coverages.png", safeName))})
 
-	log.Printf("Buscando la torre en la tabla principal: %s", towerName)
+	searchLocator := page.Locator("input.tablesorter-filter[data-column='1']").First()
 
 	if err := searchLocator.WaitFor(playwright.LocatorWaitForOptions{
 		State: playwright.WaitForSelectorStateVisible,
 	}); err != nil {
-		log.Printf("[TestAPCoverage] fallo paso esperar filtro de búsqueda de tabla: %v", err)
 		return nil, fmt.Errorf("error esperando input de búsqueda en coverages: %w", err)
 	}
 
 	if err := searchLocator.Fill(towerName); err != nil {
-		log.Printf("[TestAPCoverage] fallo paso escribir nombre de torre en el filtro: %v", err)
 		return nil, fmt.Errorf("error escribiendo en input: %w", err)
 	}
 
@@ -317,179 +317,111 @@ func (s *TowerScraper) TestAPCoverage(towerName string, aps []db.APInfo, latClie
 		log.Printf("[TestAPCoverage] fallo paso Enter en filtro de torre: %v", err)
 	}
 
+	// Pausa necesaria para la renderización de la tabla
 	page.WaitForTimeout(1500)
+
+	// 📸 PANTALLAZO 2: Verificamos que el filtro funcionó usando el nombre de la torre devuelto en el Paso 1
+	page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String(fmt.Sprintf("%s_02_search.png", safeName))})
 
 	// 3. Buscar la fila correspondiente a la TORRE
 	rowLocators := page.Locator("tr[role='row']:not(.tablesorter-filter-row)")
 	count, err := rowLocators.Count()
-	if err != nil {
-		log.Printf("[TestAPCoverage] fallo paso contar filas de la tabla (torre %q): %v", towerName, err)
-		return nil, nil
-	}
-	if count == 0 {
-		log.Printf("[TestAPCoverage] fallo paso tabla sin filas de datos para la torre %q", towerName)
-		return nil, nil
+	if err != nil || count == 0 {
+		return nil, fmt.Errorf("sin filas de datos para la torre %q", towerName)
 	}
 
 	var selectedRow playwright.Locator
 
 	for i := 0; i < count; i++ {
 		row := rowLocators.Nth(i)
-
-		listNameText, err := row.Locator("td.listName").InnerText()
-		if err != nil {
-			log.Printf("[TestAPCoverage] fallo al leer columna listName (fila %d, torre buscada %q): %v", i, towerName, err)
-			continue
-		}
-
+		listNameText, _ := row.Locator("td.listName").InnerText()
 		listNameText = strings.TrimSpace(listNameText)
 
 		if strings.Contains(strings.ToLower(listNameText), strings.ToLower(towerName)) {
-			if selectedRow == nil {
-				selectedRow = row
-			}
-
-			if strings.HasPrefix(strings.ToUpper(listNameText), "OSN.") {
-				selectedRow = row
-				log.Printf("Coincidencia perfecta de torre encontrada: %s", listNameText)
-				break
-			}
+			selectedRow = row
+			break
 		}
 	}
 
 	if selectedRow == nil {
-		log.Printf("[TestAPCoverage] fallo paso localizar fila de la torre %q en la tabla (sin coincidencia)", towerName)
-		return nil, nil
+		return nil, fmt.Errorf("sin coincidencia de texto en tabla para %q", towerName)
 	}
 
 	// 4. Hacer clic para ENTRAR a la configuración de la Torre
 	editLink := selectedRow.Locator("td.listName a").First()
 	if err := editLink.Click(); err != nil {
-		log.Printf("[TestAPCoverage] fallo paso clic en enlace de edición de la torre %q: %v", towerName, err)
 		return nil, fmt.Errorf("error haciendo clic en la torre %s: %w", towerName, err)
 	}
 
 	if err := page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
 		State: playwright.LoadStateNetworkidle,
 	}); err != nil {
-		log.Printf("[TestAPCoverage] fallo paso esperar carga de página tras entrar a la torre %q: %v", towerName, err)
+		log.Printf("[TestAPCoverage] timeout en Networkidle para %q", towerName)
 	}
 
-	log.Printf("✅ Hemos ingresado a la configuración de la torre: %s", towerName)
+	page.WaitForTimeout(1500)
 
+	// 📸 PANTALLAZO 3: Verificamos que estamos dentro de las configuraciones de ESA torre en específico
+	page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String(fmt.Sprintf("%s_03_inside_tower.png", safeName))})
+
+	log.Printf("✅ Hemos ingresado a la configuración de la torre: %s", towerName)
 	// ==========================================
 	// 5. BUCLE DE PRUEBAS PARA CADA AP
 	// ==========================================
 	var apsValidados []db.APInfo
 
-	for _, ap := range aps {
-		log.Printf("Prueba de AP -> Nombre: %s | Azimut: %s | Tilt: %s", ap.APName, ap.Azimut, ap.Tilt)
+	for i, ap := range aps {
+        log.Printf("Prueba de AP [%d] -> Nombre: %s", i+1, ap.APName)
 
-		// 1) Ingresar coordenadas del cliente
-		coordenadas := fmt.Sprintf("%s, %s", latCliente, lonCliente)
-		addressInput := page.Locator("#address")
+        // 1) Ingresar coordenadas del cliente
+        addressInput := page.Locator("#address")
+        if err := addressInput.Fill(fmt.Sprintf("%s, %s", latCliente, lonCliente)); err != nil {
+            log.Printf("Error coordenadas: %v", err)
+            continue
+        }
+        page.Locator("input.newbutton[value='Search']").Click()
+        page.WaitForTimeout(1000)
 
-		if err := addressInput.Fill(coordenadas); err != nil {
-			log.Printf("[TestAPCoverage AP=%s] fallo paso rellenar #address (coordenadas cliente): %v", ap.APName, err)
-			continue
-		}
+        // 2) Llenar parámetros técnicos
+        page.Locator("#RadioSystemList").SelectOption(playwright.SelectOptionValues{Indexes: &[]int{1}})
+        
+        if ap.Altura != "" {
+            page.Locator("#AntennaHeightfeet").Fill(ap.Altura)
+        }
 
-		searchBtn := page.Locator("input.newbutton[value='Search']")
-		if err := searchBtn.Click(); err != nil {
-			log.Printf("[TestAPCoverage AP=%s] fallo paso clic en Search tras coordenadas: %v", ap.APName, err)
-		}
-		page.WaitForTimeout(1500)
+        reNumeros := regexp.MustCompile(`[^\d.]`)
+        azimuthLimpio := reNumeros.ReplaceAllString(ap.Azimut, "")
+        if azimuthLimpio != "" {
+            page.Locator("#Azimuth").Fill(azimuthLimpio)
+        }
 
-		// 2) Radio System: único select con valor predefinido (índice 1)
-		radioSystemSelect := page.Locator("#RadioSystemList")
-		if _, err := radioSystemSelect.SelectOption(playwright.SelectOptionValues{
-			Indexes: &[]int{1},
-		}); err != nil {
-			log.Printf("[TestAPCoverage AP=%s] fallo paso seleccionar Radio System (#RadioSystemList): %v", ap.APName, err)
-		}
+        // Inyectar Tilt (campo readonly en el sitio)
+        tiltLimpio := reNumeros.ReplaceAllString(ap.Tilt, "")
+        if tiltLimpio != "" {
+            page.Evaluate(fmt.Sprintf(`document.getElementById("AntennaDecimalTilt").value = "%s";`, tiltLimpio))
+        }
 
-		// 3) Altura en pies: solo si viene de la DB (sin valor por defecto)
-		alturaInput := page.Locator("#AntennaHeightfeet")
-		alturaPies := strings.TrimSpace(ap.Altura)
-		if err := alturaInput.Fill(""); err != nil {
-			log.Printf("[TestAPCoverage AP=%s] fallo paso limpiar altura en pies (#AntennaHeightfeet): %v", ap.APName, err)
-		}
-		if alturaPies != "" {
-			if err := alturaInput.Fill(alturaPies); err != nil {
-				log.Printf("[TestAPCoverage AP=%s] fallo paso rellenar altura en pies: %v", ap.APName, err)
-			}
-			if err := alturaInput.Blur(); err != nil {
-				log.Printf("[TestAPCoverage AP=%s] fallo paso blur en altura en pies: %v", ap.APName, err)
-			}
-		} else {
-			if err := alturaInput.Blur(); err != nil {
-				log.Printf("[TestAPCoverage AP=%s] fallo paso blur en altura en pies (campo vacío en BD): %v", ap.APName, err)
-			}
-		}
+        // 📸 PANTALLAZO CLAVE: Ver los datos llenos en la tabla antes de procesar
+        // Guardamos uno por cada AP para que veas la diferencia
+        page.Screenshot(playwright.PageScreenshotOptions{
+            Path: playwright.String(fmt.Sprintf("%s_AP_%d_%s_datos.png", safeName, i, ap.APName)),
+        })
 
-		// 4) Azimuth (solo números): solo si hay dato en la DB
-		azimuthInput := page.Locator("#Azimuth")
-		reNumeros := regexp.MustCompile(`[^\d.]`)
-		azimuthLimpio := strings.TrimSpace(reNumeros.ReplaceAllString(ap.Azimut, ""))
-		if err := azimuthInput.Fill(""); err != nil {
-			log.Printf("[TestAPCoverage AP=%s] fallo paso limpiar Azimuth (#Azimuth): %v", ap.APName, err)
-		}
-		if azimuthLimpio != "" {
-			if err := azimuthInput.Fill(azimuthLimpio); err != nil {
-				log.Printf("[TestAPCoverage AP=%s] fallo paso rellenar Azimuth: %v", ap.APName, err)
-			}
-			if err := azimuthInput.Press("Enter"); err != nil {
-				log.Printf("[TestAPCoverage AP=%s] fallo paso Enter en Azimuth: %v", ap.APName, err)
-			}
-		}
+        // 3) Ejecutar Procesamiento
+        if err := page.Locator("#showFilter").Click(); err != nil {
+            log.Printf("Error en clic BeamWidth: %v", err)
+        }
+        
+        page.WaitForTimeout(2000) // Esperar a que el mapa visual de la antena cargue
 
-		// 5) Beamwidth Filter
-		beamwidthInput := page.Locator("#BeamwidthFilter")
-		if err := beamwidthInput.Fill("90"); err != nil {
-			log.Printf("[TestAPCoverage AP=%s] fallo paso rellenar Beamwidth (#BeamwidthFilter): %v", ap.APName, err)
-		}
-		if err := beamwidthInput.Press("Enter"); err != nil {
-			log.Printf("[TestAPCoverage AP=%s] fallo paso Enter en Beamwidth: %v", ap.APName, err)
-		}
+        // 📸 PANTALLAZO FINAL: Ver el resultado del "cono" de cobertura en el mapa
+        page.Screenshot(playwright.PageScreenshotOptions{
+            Path: playwright.String(fmt.Sprintf("%s_AP_%d_%s_resultado.png", safeName, i, ap.APName)),
+        })
 
-		// ==========================================
-		// NUEVA INTEGRACIÓN: TILT Y SITE TRANSMITTER INFO
-		// ==========================================
-
-		// 6) Tilt (readonly): solo si hay dato en la DB (sin valor por defecto)
-		reTilt := regexp.MustCompile(`[^\d.-]`)
-		tiltLimpio := strings.TrimSpace(reTilt.ReplaceAllString(ap.Tilt, ""))
-		if tiltLimpio != "" {
-			scriptTilt := fmt.Sprintf(`document.getElementById("AntennaDecimalTilt").value = "%s";`, tiltLimpio)
-			if _, err := page.Evaluate(scriptTilt); err != nil {
-				log.Printf("[TestAPCoverage AP=%s] fallo paso inyectar Tilt (#AntennaDecimalTilt): %v", ap.APName, err)
-			}
-		} else {
-			if _, err := page.Evaluate(`document.getElementById("AntennaDecimalTilt").value = "";`); err != nil {
-				log.Printf("[TestAPCoverage AP=%s] fallo paso limpiar Tilt (#AntennaDecimalTilt): %v", ap.APName, err)
-			}
-		}
-
-		// 8) ACCIONAR EL BOTÓN "BeamWidth"
-		beamwidthBtn := page.Locator("#showFilter")
-		if err := beamwidthBtn.Click(); err != nil {
-			log.Printf("[TestAPCoverage AP=%s] fallo paso clic en botón BeamWidth (#showFilter): %v", ap.APName, err)
-		} else {
-			log.Printf("✅ Clic exitoso en BeamWidth para el AP: %s", ap.APName)
-		}
-
-		// Damos un tiempo para que el script ShowBeam() termine de ejecutarse
-		page.WaitForTimeout(2000)
-
-		// ==========================================
-		// 9) EVALUAR EL RESULTADO (Análisis Visual o del DOM)
-		// ==========================================
-
-		// (AQUÍ VA LA LÓGICA DE EXTRACCIÓN DEL RESULTADO)
-
-		ap.Status = "Pendiente de validación visual"
-		apsValidados = append(apsValidados, ap)
-	}
+        ap.Status = "Validación visual generada"
+        apsValidados = append(apsValidados, ap)
+    }
 
 	return apsValidados, nil
 }

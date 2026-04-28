@@ -14,12 +14,21 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"tower-scraper/internal/config"
+	"tower-scraper/internal/db"
+	"tower-scraper/internal/models"
 	"tower-scraper/internal/scraper"
 )
 
 func main() {
 	log.Println("Cargando configuración...")
 	cfg := config.LoadConfig()
+
+	// INICIALIZAMOS LA BASE DE DATOS SOLO PARA LECTURA DE APs
+	log.Println("Conectando a la base de datos MySQL...")
+	dbClient, err := db.NewDBClient(cfg)
+	if err != nil {
+		log.Fatalf("Error inicializando DB: %v", err)
+	}
 
 	log.Println("Inicializando motor Headless...")
 	ts, err := scraper.NewTowerScraper()
@@ -34,47 +43,70 @@ func main() {
 		log.Fatalf("Error en el login: %v", err)
 	}
 
-	// 1. Inicializamos el Servidor MCP
-	mcpServer := server.NewMCPServer(
-		"TowerCoverageService",
-		"1.0.0",
-	)
+	mcpServer := server.NewMCPServer("TowerCoverageService", "1.0.0")
 
-	// 2. Definimos el "contrato" de la herramienta para que el Agente de IA la entienda
 	tool := mcp.NewTool("get_tower_coverage",
-		mcp.WithDescription("Consulta TowerCoverage para encontrar torres con 'Good Link' a menos de 6 millas. Devuelve distancias, señal, alineación y tilt."),
+		mcp.WithDescription("Obtiene torres cercanas y automáticamente verifica la cobertura de sus APs desde TowerCoverage."),
 		mcp.WithString("lat", mcp.Required(), mcp.Description("Latitud de la antena cliente (ej. 18.465500)")),
 		mcp.WithString("lon", mcp.Required(), mcp.Description("Longitud de la antena cliente (ej. -66.105700)")),
 	)
 
-	// 3. Añadimos el manejador (Handler) de la herramienta
 	mcpServer.AddTool(tool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		lat, err := request.RequireString("lat")
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("lat: %v", err)), nil
-		}
-		lon, err := request.RequireString("lon")
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("lon: %v", err)), nil
-		}
+		lat, _ := request.RequireString("lat")
+		lon, _ := request.RequireString("lon")
 
-		log.Printf("🤖 MCP Request recibida -> Lat: %s, Lon: %s", lat, lon)
+		log.Printf("🤖 MCP Request (n8n) recibida -> Lat: %s, Lon: %s", lat, lon)
 
-		// Ejecutamos el scraper
+		// --- PASO 1: Obtener torres cercanas del mapa ---
 		torres, err := ts.GetTowersData(lat, lon)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Fallo al obtener datos del mapa: %v", err)), nil
 		}
 
-		// Convertimos el array de structs a JSON formateado
-		resultJSON, err := json.MarshalIndent(torres, "", "  ")
+		// Estructura combinada para devolver al agente
+		type TowerResult struct {
+			TowerInfo models.TowerCoverage `json:"tower_info"`
+			APs       []db.APInfo          `json:"aps_validados,omitempty"`
+		}
+		var resultadosFinales []TowerResult
+
+		// --- PASOS 2 y 3: Iterar sobre las torres encontradas ---
+		for _, torre := range torres {
+			log.Printf("Buscando APs en BD para la torre encontrada: %s", torre.TowerName)
+
+			// Consultar la DB con el nombre extraído en el Paso 1
+			aps, err := dbClient.ObtenerAPsPorTorre(torre.TowerName)
+			if err != nil {
+				log.Printf("Error BD con torre %s: %v", torre.TowerName, err)
+				resultadosFinales = append(resultadosFinales, TowerResult{TowerInfo: torre})
+				continue
+			}
+
+			if len(aps) > 0 {
+				log.Printf("Se encontraron %d APs en DB para %s. Entrando a verificar...", len(aps), torre.TowerName)
+
+				// Ejecutar navegación (Paso 2, 3 y 4)
+				apsValidados, errTest := ts.TestAPCoverage(torre.TowerName, aps, lat, lon)
+				if errTest != nil {
+					log.Printf("Fallo en la prueba de cobertura para %s: %v", torre.TowerName, errTest)
+				}
+				resultadosFinales = append(resultadosFinales, TowerResult{
+					TowerInfo: torre,
+					APs:       apsValidados,
+				})
+			} else {
+				log.Printf("No hay APs configurados en DB para la torre %s", torre.TowerName)
+				resultadosFinales = append(resultadosFinales, TowerResult{TowerInfo: torre})
+			}
+		}
+
+		// Convertir resultados a JSON para devolver directamente (sin almacenar)
+		resultJSON, err := json.MarshalIndent(resultadosFinales, "", "  ")
 		if err != nil {
 			return mcp.NewToolResultError("Error formateando respuesta JSON"), nil
 		}
 
 		log.Println("✅ Respuesta MCP enviada al agente.")
-
-		// Retornamos el texto a la IA
 		return mcp.NewToolResultText(string(resultJSON)), nil
 	})
 

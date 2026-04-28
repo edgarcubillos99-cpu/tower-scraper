@@ -57,11 +57,10 @@ func NewDBClient(cfg *config.Config) (*DBClient, error) {
 func (c *DBClient) ObtenerAPsPorTorre(nombreTorreTC string) ([]APInfo, error) {
 	nombreLimpio := strings.ReplaceAll(nombreTorreTC, "OSN.", "")
 	nombreLimpio = strings.TrimSpace(nombreLimpio)
-	query := `
-		SELECT a.ap_nombre, a.tipo, a.azimut, a.tilt, a.altura 
-		FROM dispositivos_ap 
-		WHERE torre_nombre LIKE ?
-	`
+	query := `SELECT a.ap_name, a.azimut, a.tilt, a.altura, a.tipo 
+          FROM dispositivos_ap a 
+          WHERE a.torre_nombre LIKE ?`
+
 	// El % permite coincidencias parciales (ej: "OSN.Torre Principal" coincidirá con "Torre Principal")
 	searchParam := "%" + nombreLimpio + "%"
 
@@ -74,8 +73,8 @@ func (c *DBClient) ObtenerAPsPorTorre(nombreTorreTC string) ([]APInfo, error) {
 	var aps []APInfo
 	for rows.Next() {
 		var ap APInfo
-		if err := rows.Scan(&ap.APName, &ap.Tipo, &ap.Azimut, &ap.Tilt, &ap.Altura); err != nil {
-			continue // Podrías agregar un log de advertencia aquí
+		if err := rows.Scan(&ap.APName, &ap.Azimut, &ap.Tilt, &ap.Altura, &ap.Tipo); err != nil {
+			return nil, err
 		}
 		aps = append(aps, ap)
 	}
