@@ -371,57 +371,76 @@ func (s *TowerScraper) TestAPCoverage(towerName string, aps []db.APInfo, latClie
 	var apsValidados []db.APInfo
 
 	for i, ap := range aps {
-        log.Printf("Prueba de AP [%d] -> Nombre: %s", i+1, ap.APName)
+		log.Printf("Prueba de AP [%d] -> Nombre: %s", i+1, ap.APName)
 
-        // 1) Ingresar coordenadas del cliente
-        addressInput := page.Locator("#address")
-        if err := addressInput.Fill(fmt.Sprintf("%s, %s", latCliente, lonCliente)); err != nil {
-            log.Printf("Error coordenadas: %v", err)
-            continue
-        }
-        page.Locator("input.newbutton[value='Search']").Click()
-        page.WaitForTimeout(1000)
+		// 1) Ingresar coordenadas del cliente
+		addressInput := page.Locator("#address")
+		if err := addressInput.Fill(fmt.Sprintf("%s, %s", latCliente, lonCliente)); err != nil {
+			log.Printf("Error coordenadas: %v", err)
+			continue
+		}
+		page.Locator("input.newbutton[value='Search']").Click()
+		page.WaitForTimeout(1000)
 
-        // 2) Llenar parámetros técnicos
-        page.Locator("#RadioSystemList").SelectOption(playwright.SelectOptionValues{Indexes: &[]int{1}})
-        
-        if ap.Altura != "" {
-            page.Locator("#AntennaHeightfeet").Fill(ap.Altura)
-        }
+		// 2) Llenar parámetros técnicos
+		page.Locator("#RadioSystemList").SelectOption(playwright.SelectOptionValues{Indexes: &[]int{1}})
 
-        reNumeros := regexp.MustCompile(`[^\d.]`)
-        azimuthLimpio := reNumeros.ReplaceAllString(ap.Azimut, "")
-        if azimuthLimpio != "" {
-            page.Locator("#Azimuth").Fill(azimuthLimpio)
-        }
+		page.WaitForTimeout(500)
 
-        // Inyectar Tilt (campo readonly en el sitio)
-        tiltLimpio := reNumeros.ReplaceAllString(ap.Tilt, "")
-        if tiltLimpio != "" {
-            page.Evaluate(fmt.Sprintf(`document.getElementById("AntennaDecimalTilt").value = "%s";`, tiltLimpio))
-        }
+		reNumeros := regexp.MustCompile(`[^\d.]`) // Permite solo números y puntos
+		alturaLimpia := reNumeros.ReplaceAllString(ap.Altura, "")
 
-        // 📸 PANTALLAZO CLAVE: Ver los datos llenos en la tabla antes de procesar
-        // Guardamos uno por cada AP para que veas la diferencia
-        page.Screenshot(playwright.PageScreenshotOptions{
-            Path: playwright.String(fmt.Sprintf("%s_AP_%d_%s_datos.png", safeName, i, ap.APName)),
-        })
+		if alturaLimpia != "" {
+			alturaInput := page.Locator("#AntennaHeightfeet")
+			if err := alturaInput.WaitFor(playwright.LocatorWaitForOptions{
+				State: playwright.WaitForSelectorStateVisible,
+			}); err == nil {
+				alturaInput.Clear() // Borramos el valor por defecto que pueda tener
+				if err := alturaInput.Fill(alturaLimpia); err != nil {
+					log.Printf("[TestAPCoverage AP=%s] fallo al llenar altura: %v", ap.APName, err)
+				}
 
-        // 3) Ejecutar Procesamiento
-        if err := page.Locator("#showFilter").Click(); err != nil {
-            log.Printf("Error en clic BeamWidth: %v", err)
-        }
-        
-        page.WaitForTimeout(2000) // Esperar a que el mapa visual de la antena cargue
+				alturaInput.Blur()
+			} else {
+				// Plan B: Inyección directa por JavaScript si el DOM está bloqueado
+				script := fmt.Sprintf(`document.getElementById("AntennaHeightfeet").value = "%s";`, alturaLimpia)
+				page.Evaluate(script)
+			}
+		}
 
-        // 📸 PANTALLAZO FINAL: Ver el resultado del "cono" de cobertura en el mapa
-        page.Screenshot(playwright.PageScreenshotOptions{
-            Path: playwright.String(fmt.Sprintf("%s_AP_%d_%s_resultado.png", safeName, i, ap.APName)),
-        })
+		reNumeros = regexp.MustCompile(`[^\d.]`)
+		azimuthLimpio := reNumeros.ReplaceAllString(ap.Azimut, "")
+		if azimuthLimpio != "" {
+			page.Locator("#Azimuth").Fill(azimuthLimpio)
+		}
 
-        ap.Status = "Validación visual generada"
-        apsValidados = append(apsValidados, ap)
-    }
+		// Inyectar Tilt (campo readonly en el sitio)
+		tiltLimpio := reNumeros.ReplaceAllString(ap.Tilt, "")
+		if tiltLimpio != "" {
+			page.Evaluate(fmt.Sprintf(`document.getElementById("AntennaDecimalTilt").value = "%s";`, tiltLimpio))
+		}
+
+		// 📸 PANTALLAZO CLAVE: Ver los datos llenos en la tabla antes de procesar
+		// Guardamos uno por cada AP para que veas la diferencia
+		page.Screenshot(playwright.PageScreenshotOptions{
+			Path: playwright.String(fmt.Sprintf("%s_AP_%d_%s_datos.png", safeName, i, ap.APName)),
+		})
+
+		// 3) Ejecutar Procesamiento
+		if err := page.Locator("#showFilter").Click(); err != nil {
+			log.Printf("Error en clic BeamWidth: %v", err)
+		}
+
+		page.WaitForTimeout(10000) // Esperar a que el mapa visual de la antena cargue
+
+		// 📸 PANTALLAZO FINAL: Ver el resultado del "cono" de cobertura en el mapa
+		page.Screenshot(playwright.PageScreenshotOptions{
+			Path: playwright.String(fmt.Sprintf("%s_AP_%d_%s_resultado.png", safeName, i, ap.APName)),
+		})
+
+		ap.Status = "Validación visual generada"
+		apsValidados = append(apsValidados, ap)
+	}
 
 	return apsValidados, nil
 }
