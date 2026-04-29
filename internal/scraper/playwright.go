@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"tower-scraper/internal/db"
 	"tower-scraper/internal/models"
@@ -95,7 +96,7 @@ func (s *TowerScraper) Login(username, password string) error {
 		State: playwright.WaitForSelectorStateVisible,
 	}); err != nil {
 		log.Printf("[Login] fallo esperando texto \"Sign Out\" (timeout o no visible): %v", err)
-		page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String("error_timeout_login.png")})
+		//page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String("error_timeout_login.png")})
 		return fmt.Errorf("el dashboard no cargó a tiempo tras el login: %v", err)
 	}
 
@@ -344,30 +345,23 @@ func (s *TowerScraper) TestAPCoverage(towerName string, aps []db.APInfo, latClie
 	page.Close()
 	log.Printf("URL directa obtenida: %s. Iniciando Worker Pool...", towerURL)
 
-	// BUCLE CONCURRENTE (WORKER POOL)
 	var apsValidados []db.APInfo
 	var wg sync.WaitGroup
-	var mu sync.Mutex // Para proteger el slice de resultados
+	var mu sync.Mutex
 
-	// Canal de trabajos
-	type Job struct {
+	type job struct {
 		Index int
 		AP    db.APInfo
 	}
-	jobs := make(chan Job, len(aps))
+	jobs := make(chan job, len(aps))
+	numWorkers := 10
 
-	numWorkers := 10 // Pestañas simultáneas. Ajusta según los recursos de tu CPU/RAM.
-
-	// Iniciar Workers
 	for w := 0; w < numWorkers; w++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			for job := range jobs {
-				// Procesamos el AP individualmente
-				res := s.processSingleAP(workerID, towerURL, safeName, job.AP, latCliente, lonCliente, job.Index)
-
-				// Guardamos el resultado protegidos de la condición de carrera
+			for j := range jobs {
+				res := s.processSingleAP(workerID, towerURL, safeName, j.AP, latCliente, lonCliente, j.Index)
 				mu.Lock()
 				apsValidados = append(apsValidados, res)
 				mu.Unlock()
@@ -375,13 +369,10 @@ func (s *TowerScraper) TestAPCoverage(towerName string, aps []db.APInfo, latClie
 		}(w)
 	}
 
-	// Encolar todos los trabajos y cerrar el canal
 	for i, ap := range aps {
-		jobs <- Job{Index: i, AP: ap}
+		jobs <- job{Index: i, AP: ap}
 	}
 	close(jobs)
-
-	// Esperar a que todas las pestañas concurrentes terminen
 	wg.Wait()
 
 	log.Printf("✅ Todos los %d APs fueron validados concurrentemente.", len(apsValidados))
@@ -391,6 +382,7 @@ func (s *TowerScraper) TestAPCoverage(towerName string, aps []db.APInfo, latClie
 // processSingleAP abre una pestaña propia, va directo a la torre y prueba un solo AP
 func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, ap db.APInfo, latCliente, lonCliente string, i int) db.APInfo {
 	log.Printf("[Worker-%d] Iniciando AP [%d] -> Nombre: %s", workerID, i+1, ap.APName)
+	startWorker := time.Now()
 
 	page, err := s.context.NewPage()
 	if err != nil {
@@ -398,73 +390,369 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 		ap.Status = "Error de Pestaña Playwright"
 		return ap
 	}
-	defer page.Close() // Cierra esta pestaña automáticamente al terminar
+	defer page.Close()
 
-	// Navegación directa a la configuración de la antena
-	if _, err := page.Goto(towerURL, playwright.PageGotoOptions{Timeout: playwright.Float(60000)}); err != nil {
+	// Timeout por defecto bajo para que ningún locator cuelgue 30s reintentando actionability
+	page.SetDefaultTimeout(8000)
+
+	if _, err := page.Goto(towerURL, playwright.PageGotoOptions{
+		Timeout:   playwright.Float(60000),
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
+	}); err != nil {
 		log.Printf("[Worker-%d] Error navegando para %s: %v", workerID, ap.APName, err)
 		ap.Status = "Error cargando URL"
 		return ap
 	}
 
 	// 1) Coordenadas
-	page.Locator("#address").Fill(fmt.Sprintf("%s, %s", latCliente, lonCliente))
-	page.Locator("input.newbutton[value='Search']").Click()
-	page.WaitForTimeout(1000)
+	if err := page.Locator("#address").Fill(fmt.Sprintf("%s, %s", latCliente, lonCliente)); err != nil {
+		log.Printf("[Worker-%d] fallo #address para %s: %v", workerID, ap.APName, err)
+	}
+	if err := page.Locator("input.newbutton[value='Search']").Click(); err != nil {
+		log.Printf("[Worker-%d] fallo click Search para %s: %v", workerID, ap.APName, err)
+	}
+	// La búsqueda repinta el mapa y a veces rehace el formulario; esperar red antes de tocar parámetros.
+	_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+		State:   playwright.LoadStateNetworkidle,
+		Timeout: playwright.Float(15000),
+	})
 
-	// 2) Parámetros
-	page.Locator("#RadioSystemList").SelectOption(playwright.SelectOptionValues{Indexes: &[]int{1}})
-	page.WaitForTimeout(500)
+	// Hay que elegir alguna opción del sistema de radio (índice 1 = primera opción distinta del placeholder).
+	if _, err := page.Locator("#RadioSystemList").SelectOption(playwright.SelectOptionValues{Indexes: &[]int{1}}); err != nil {
+		log.Printf("[Worker-%d] fallo SelectOption RadioSystem para %s: %v", workerID, ap.APName, err)
+	}
+	_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+		State:   playwright.LoadStateNetworkidle,
+		Timeout: playwright.Float(12000),
+	})
 
+	// 2) Antenna Height → Beamwidth (90) → Azimuth al final. El beamwidth puede disparar recálculo del formulario
+	// y dejar el azimut en 0 si lo rellenamos antes; por eso no se llama a #showFilter hasta que #Azimuth coincida con la BD.
 	reNumeros := regexp.MustCompile(`[^\d.]`)
 	alturaLimpia := reNumeros.ReplaceAllString(ap.Altura, "")
 	if alturaLimpia != "" {
 		alturaInput := page.Locator("#AntennaHeightfeet")
-		if err := alturaInput.WaitFor(playwright.LocatorWaitForOptions{State: playwright.WaitForSelectorStateVisible}); err == nil {
-			alturaInput.Clear()
-			alturaInput.Fill(alturaLimpia)
-			alturaInput.Blur()
+		if err := alturaInput.WaitFor(playwright.LocatorWaitForOptions{
+			State:   playwright.WaitForSelectorStateVisible,
+			Timeout: playwright.Float(4000),
+		}); err == nil {
+			_ = alturaInput.Fill(alturaLimpia)
+			_ = alturaInput.Blur()
 		} else {
-			page.Evaluate(fmt.Sprintf(`document.getElementById("AntennaHeightfeet").value = "%s";`, alturaLimpia))
+			_, _ = page.Evaluate(fmt.Sprintf(`document.getElementById("AntennaHeightfeet").value = "%s";`, alturaLimpia))
 		}
 	}
+
+	setBeamwidthFilterFixed(page, "90")
+	_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+		State:   playwright.LoadStateNetworkidle,
+		Timeout: playwright.Float(10000),
+	})
 
 	azimuthLimpio := reNumeros.ReplaceAllString(ap.Azimut, "")
 	if azimuthLimpio != "" {
-		page.Locator("#Azimuth").Fill(azimuthLimpio)
-	}
-
-	tiltLimpio := reNumeros.ReplaceAllString(ap.Tilt, "")
-	if tiltLimpio != "" {
-		page.Evaluate(fmt.Sprintf(`document.getElementById("AntennaDecimalTilt").value = "%s";`, tiltLimpio))
-	}
-
-	// 3) Ejecutar
-	page.Locator("#showFilter").Click()
-
-	// Le damos 10 segundos para que el servidor pinte el RF en el mapa
-	page.WaitForTimeout(10000)
-
-	// ALEJAR EL MAPA (ZOOM OUT)
-
-	// Buscamos botones comunes de Google Maps o Leaflet
-	zoomOutBtn := page.Locator(`button[title="Zoom out"], button[aria-label="Zoom out"], .leaflet-control-zoom-out`).First()
-	if count, _ := zoomOutBtn.Count(); count > 0 {
-		log.Printf("[Worker-%d] Alejando mapa para %s...", workerID, ap.APName)
-		for z := 0; z < 10; z++ { // Clic al menos 10 veces para alejar
-			zoomOutBtn.Click()
-			page.WaitForTimeout(400) // Pausa para que el mapa asimile el click
+		if !ensureAzimuthCommitted(page, workerID, ap.APName, azimuthLimpio) {
+			log.Printf("[Worker-%d] azimut no confirmado para %s (esperado %q); se omite #showFilter para no pintar RF erróneo", workerID, ap.APName, azimuthLimpio)
+			ap.Status = "Azimut no confirmado; RF omitido"
+			if _, err := page.Screenshot(playwright.PageScreenshotOptions{
+				Path:     playwright.String(fmt.Sprintf("%s_AP_%d_%s_resultado.png", safeName, i, ap.APName)),
+				FullPage: playwright.Bool(true),
+			}); err != nil {
+				log.Printf("[Worker-%d] fallo screenshot tras fallo azimut %s: %v", workerID, ap.APName, err)
+			}
+			return ap
 		}
 	}
 
-	// 📸 PANTALLAZO FINAL
-	page.Screenshot(playwright.PageScreenshotOptions{
-		Path:     playwright.String(fmt.Sprintf("%s_AP_%d_%s_resultado.png", safeName, i, ap.APName)),
-		FullPage: playwright.Bool(true),
+	// 3) Ejecutar y esperar a que el render RF termine usando 'networkidle' en vez de sleep ciego.
+	if err := page.Locator("#showFilter").Click(); err != nil {
+		log.Printf("[Worker-%d] fallo click #showFilter para %s: %v", workerID, ap.APName, err)
+	}
+	_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+		State:   playwright.LoadStateNetworkidle,
+		Timeout: playwright.Float(20000),
 	})
 
+	// 4) ALEJAR EL MAPA (ZOOM OUT)
+	t0 := time.Now()
+	if ok := zoomOutMap(page, 2); ok {
+		log.Printf("[Worker-%d] Zoom out OK para %s en %s", workerID, ap.APName, time.Since(t0).Round(time.Millisecond))
+	} else {
+		log.Printf("[Worker-%d] No se pudo alejar el mapa para %s (sin botón reconocible)", workerID, ap.APName)
+	}
+	// Pequeña espera para que se re-rendericen los tiles tras el último clic
+	page.WaitForTimeout(1200)
+
+	if _, err := page.Screenshot(playwright.PageScreenshotOptions{
+		Path:     playwright.String(fmt.Sprintf("%s_AP_%d_%s_resultado.png", safeName, i, ap.APName)),
+		FullPage: playwright.Bool(true),
+	}); err != nil {
+		log.Printf("[Worker-%d] fallo screenshot para %s: %v", workerID, ap.APName, err)
+	}
+
 	ap.Status = "Validación visual generada"
+	log.Printf("[Worker-%d] ✅ AP [%d] %s listo en %s", workerID, i+1, ap.APName, time.Since(startWorker).Round(time.Second))
 	return ap
+}
+
+// zoomOutMap aleja el mapa probando, en orden, lo que realmente mueve el widget del mapa:
+// 1) Controles nativos (Google Maps / Leaflet).
+// 2) Enlace o botón accesible "Zoom Out" exacto (evita div:has-text que matchea contenedores enormes y el clic no hace nada).
+// 3) Rueda del ratón en el centro del contenedor del mapa (Google Maps suele responder a wheel).
+// 4) Teclado "-" con foco en el mapa.
+func zoomOutMap(page playwright.Page, steps int) bool {
+	if n := zoomOutClickLoop(page, []string{
+		`button[aria-label="Zoom out"]`,
+		`button[aria-label="Zoom Out"]`,
+		`button[title="Zoom out"]`,
+		`button[title="Zoom Out"]`,
+		`div[role="button"][aria-label="Zoom out"]`,
+		`.gm-bundled-control button[aria-label*="zoom" i]`,
+		`.leaflet-control-zoom-out`,
+	}, steps); n > 0 {
+		return true
+	}
+
+	if n := zoomOutClickLoop(page, []string{
+		`a:text-is("Zoom Out")`,
+		`td:text-is("Zoom Out")`,
+		`span:text-is("Zoom Out")`,
+	}, steps); n > 0 {
+		return true
+	}
+
+	for _, role := range []struct {
+		r    playwright.AriaRole
+		name string
+	}{
+		{playwright.AriaRole("link"), "Zoom Out"},
+		{playwright.AriaRole("button"), "Zoom Out"},
+	} {
+		loc := page.GetByRole(role.r, playwright.PageGetByRoleOptions{
+			Name:  role.name,
+			Exact: playwright.Bool(true),
+		}).First()
+		if c, _ := loc.Count(); c == 0 {
+			continue
+		}
+		if n := zoomOutClickOnLocator(page, loc, steps); n > 0 {
+			return true
+		}
+	}
+
+	if zoomOutViaMouseWheel(page, steps) {
+		return true
+	}
+
+	mapEl := page.Locator("#map, #map_canvas, .map-canvas, canvas").First()
+	if c, _ := mapEl.Count(); c > 0 {
+		_ = mapEl.Click(playwright.LocatorClickOptions{
+			Timeout: playwright.Float(1500),
+			Force:   playwright.Bool(true),
+		})
+		for z := 0; z < steps; z++ {
+			if err := page.Keyboard().Press("Minus"); err != nil {
+				return z > 0
+			}
+			page.WaitForTimeout(150)
+		}
+		return true
+	}
+
+	return false
+}
+
+func zoomOutClickLoop(page playwright.Page, selectors []string, steps int) int {
+	for _, sel := range selectors {
+		btn := page.Locator(sel).First()
+		if n, _ := btn.Count(); n == 0 {
+			continue
+		}
+		if err := btn.WaitFor(playwright.LocatorWaitForOptions{
+			State:   playwright.WaitForSelectorStateVisible,
+			Timeout: playwright.Float(2500),
+		}); err != nil {
+			continue
+		}
+		if k := zoomOutClickOnLocator(page, btn, steps); k > 0 {
+			return k
+		}
+	}
+	return 0
+}
+
+func zoomOutClickOnLocator(page playwright.Page, btn playwright.Locator, steps int) int {
+	clicked := 0
+	for z := 0; z < steps; z++ {
+		if err := btn.Click(playwright.LocatorClickOptions{
+			Timeout: playwright.Float(2000),
+			Force:   playwright.Bool(true),
+		}); err != nil {
+			break
+		}
+		clicked++
+		page.WaitForTimeout(180)
+	}
+	return clicked
+}
+
+// zoomOutViaMouseWheel mueve el cursor al centro del mapa y envía wheel hacia abajo (típico zoom out en Google Maps).
+func zoomOutViaMouseWheel(page playwright.Page, steps int) bool {
+	mapLoc := page.Locator("#map_canvas, #map, .map-canvas").First()
+	if n, _ := mapLoc.Count(); n == 0 {
+		return false
+	}
+	box, err := mapLoc.BoundingBox()
+	if err != nil || box == nil || box.Width < 50 || box.Height < 50 {
+		return false
+	}
+	cx := box.X + box.Width/2
+	cy := box.Y + box.Height/2
+	mouse := page.Mouse()
+	if err := mouse.Move(cx, cy); err != nil {
+		return false
+	}
+	for z := 0; z < steps; z++ {
+		if err := mouse.Wheel(0, 700); err != nil {
+			return z > 0
+		}
+		page.WaitForTimeout(200)
+	}
+	return true
+}
+
+// setBeamwidthFilterFixed escribe el campo Beamwidth Filter con un valor fijo (p. ej. "90").
+func setBeamwidthFilterFixed(page playwright.Page, grados string) {
+	grados = strings.TrimSpace(grados)
+	if grados == "" {
+		return
+	}
+	for _, sel := range []string{
+		"#BeamwidthFilter",
+		"#BeamWidthFilter",
+		"#MainContent_BeamwidthFilter",
+		"#MainContent_BeamWidthFilter",
+		`input[id*="Beamwidth"]`,
+		`input[id*="beamwidth"]`,
+	} {
+		loc := page.Locator(sel).First()
+		n, _ := loc.Count()
+		if n == 0 {
+			continue
+		}
+		_ = commitInputUntilValue(page, sel, grados, 5*time.Second)
+		return
+	}
+}
+
+// dispatchInputChange fuerza value + eventos input/change (Angular/KO suelen ignorar solo Fill).
+func dispatchInputChange(page playwright.Page, sel, val string) {
+	_, _ = page.Evaluate(fmt.Sprintf(`() => {
+		const el = document.querySelector(%q);
+		if (!el) return;
+		el.focus();
+		el.value = %q;
+		el.dispatchEvent(new Event("input", { bubbles: true }));
+		el.dispatchEvent(new Event("change", { bubbles: true }));
+	}`, sel, val))
+}
+
+func inputStringsMatchDegrees(got, want string) bool {
+	got = strings.TrimSpace(got)
+	want = strings.TrimSpace(want)
+	if got == want {
+		return true
+	}
+	gf, err1 := strconv.ParseFloat(got, 64)
+	wf, err2 := strconv.ParseFloat(want, 64)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	d := gf - wf
+	if d < 0 {
+		d = -d
+	}
+	return d < 0.02
+}
+
+// commitInputUntilValue rellena y reintenta hasta que el valor en DOM coincide (evita race tras Search / RadioSystem).
+func commitInputUntilValue(page playwright.Page, selector, want string, maxWait time.Duration) error {
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return nil
+	}
+	loc := page.Locator(selector).First()
+	if err := loc.WaitFor(playwright.LocatorWaitForOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(8000),
+	}); err != nil {
+		return fmt.Errorf("campo %s no visible: %w", selector, err)
+	}
+
+	deadline := time.Now().Add(maxWait)
+	for time.Now().Before(deadline) {
+		_ = loc.Click(playwright.LocatorClickOptions{
+			Timeout: playwright.Float(2000),
+			Force:   playwright.Bool(true),
+		})
+		_ = loc.Fill(want)
+		_ = loc.Blur()
+		dispatchInputChange(page, selector, want)
+
+		got, err := loc.InputValue()
+		if err == nil && inputStringsMatchDegrees(got, want) {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	got, _ := loc.InputValue()
+	return fmt.Errorf("timeout leyendo %s (último valor %q, esperado %q)", selector, got, want)
+}
+
+func inputValueMatches(page playwright.Page, selector, want string) (bool, string) {
+	loc := page.Locator(selector).First()
+	got, err := loc.InputValue()
+	if err != nil {
+		return false, ""
+	}
+	return inputStringsMatchDegrees(got, want), strings.TrimSpace(got)
+}
+
+// ensureAzimuthCommitted evita #showFilter hasta que #Azimuth en el DOM coincide con want (hasta ~40s).
+// El sitio suele resetear el azimut a 0 tras beamwidth u otros handlers; por eso se reintenta tras networkidle.
+func ensureAzimuthCommitted(page playwright.Page, workerID int, apName, want string) bool {
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return true
+	}
+	deadline := time.Now().Add(40 * time.Second)
+	for attempt := 1; time.Now().Before(deadline); attempt++ {
+		remaining := time.Until(deadline)
+		perAttempt := 7 * time.Second
+		if remaining < perAttempt {
+			perAttempt = remaining
+		}
+		if perAttempt < 800*time.Millisecond {
+			break
+		}
+		azi := page.Locator("#Azimuth").First()
+		_ = azi.ScrollIntoViewIfNeeded()
+		_ = commitInputUntilValue(page, "#Azimuth", want, perAttempt)
+		ok, got := inputValueMatches(page, "#Azimuth", want)
+		if ok {
+			if attempt > 1 {
+				log.Printf("[Worker-%d] azimut OK para %s tras %d intentos", workerID, apName, attempt)
+			}
+			return true
+		}
+		log.Printf("[Worker-%d] azimut intento %d %s: DOM=%q esperado=%q", workerID, attempt, apName, got, want)
+		_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+			State:   playwright.LoadStateNetworkidle,
+			Timeout: playwright.Float(6500),
+		})
+		page.WaitForTimeout(400)
+	}
+	return false
 }
 
 // Close limpia los recursos al terminar la aplicación

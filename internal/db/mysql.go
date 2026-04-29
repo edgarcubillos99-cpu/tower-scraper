@@ -36,11 +36,12 @@ func NewDBClient(cfg *config.Config) (*DBClient, error) {
 		return nil, fmt.Errorf("faltan DB_HOST, DB_USER o DB_NAME en el entorno")
 	}
 	cnf := mysql.Config{
-		User:   cfg.DBUser,
-		Passwd: cfg.DBPass,
-		Net:    "tcp",
-		Addr:   mysqlAddr(cfg.DBHost),
-		DBName: cfg.DBName,
+		User:                 cfg.DBUser,
+		Passwd:               cfg.DBPass,
+		Net:                  "tcp",
+		Addr:                 mysqlAddr(cfg.DBHost),
+		DBName:               cfg.DBName,
+		AllowNativePasswords: true,
 	}
 	db, err := sql.Open("mysql", cnf.FormatDSN())
 	if err != nil {
