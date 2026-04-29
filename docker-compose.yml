@@ -13,10 +13,6 @@ services:
       - MCP_API_KEY=${MCP_API_KEY}
       - TOWER_USERNAME=${TOWER_USERNAME}
       - TOWER_PASSWORD=${TOWER_PASSWORD}
-      - DB_HOST=${DB_HOST}
-      - DB_USER=${DB_USER}
-      - DB_PASS=${DB_PASS}
-      - DB_NAME=${DB_NAME}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes: #para poder ver los archivos de la aplicacion

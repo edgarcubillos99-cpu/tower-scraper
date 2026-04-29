@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"tower-scraper/internal/db"
+	"tower-scraper/internal/geo"
 	"tower-scraper/internal/models"
+	"tower-scraper/internal/vision"
 
 	"github.com/playwright-community/playwright-go"
 )
@@ -280,7 +282,8 @@ func extractMiles(raw string) float64 {
 }
 
 // TestAPCoverage navega a Coverages, busca la torre, entra en ella y simula la configuración de sus APs
-func (s *TowerScraper) TestAPCoverage(towerName string, aps []db.APInfo, latCliente, lonCliente string) ([]db.APInfo, error) {
+func (s *TowerScraper) TestAPCoverage(torre models.TowerCoverage, aps []db.APInfo, latCliente, lonCliente string) ([]models.RespuestaMCP, error) {
+	towerName := torre.TowerName
 	safeName := strings.ReplaceAll(towerName, " ", "_")
 	safeName = strings.ReplaceAll(safeName, "/", "-")
 
@@ -345,7 +348,7 @@ func (s *TowerScraper) TestAPCoverage(towerName string, aps []db.APInfo, latClie
 	page.Close()
 	log.Printf("URL directa obtenida: %s. Iniciando Worker Pool...", towerURL)
 
-	var apsValidados []db.APInfo
+	var resultadosFinales []models.RespuestaMCP
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
@@ -361,9 +364,9 @@ func (s *TowerScraper) TestAPCoverage(towerName string, aps []db.APInfo, latClie
 		go func(workerID int) {
 			defer wg.Done()
 			for j := range jobs {
-				res := s.processSingleAP(workerID, towerURL, safeName, j.AP, latCliente, lonCliente, j.Index)
+				res := s.processSingleAP(workerID, towerURL, safeName, j.AP, latCliente, lonCliente, torre, j.Index)
 				mu.Lock()
-				apsValidados = append(apsValidados, res)
+				resultadosFinales = append(resultadosFinales, res)
 				mu.Unlock()
 			}
 		}(w)
@@ -375,20 +378,27 @@ func (s *TowerScraper) TestAPCoverage(towerName string, aps []db.APInfo, latClie
 	close(jobs)
 	wg.Wait()
 
-	log.Printf("✅ Todos los %d APs fueron validados concurrentemente.", len(apsValidados))
-	return apsValidados, nil
+	log.Printf("✅ Todos los %d APs fueron validados concurrentemente.", len(resultadosFinales))
+	return resultadosFinales, nil
 }
 
 // processSingleAP abre una pestaña propia, va directo a la torre y prueba un solo AP
-func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, ap db.APInfo, latCliente, lonCliente string, i int) db.APInfo {
+func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, ap db.APInfo, latCliente, lonCliente string, torre models.TowerCoverage, i int) models.RespuestaMCP {
 	log.Printf("[Worker-%d] Iniciando AP [%d] -> Nombre: %s", workerID, i+1, ap.APName)
 	startWorker := time.Now()
+
+	// Estructura base para retornos en caso de error prematuro
+	respuestaBase := models.RespuestaMCP{
+		Antena:    ap.APName,
+		Tipo:      ap.Tipo,
+		Cobertura: false,
+	}
 
 	page, err := s.context.NewPage()
 	if err != nil {
 		log.Printf("[Worker-%d] Error creando pestaña para %s: %v", workerID, ap.APName, err)
 		ap.Status = "Error de Pestaña Playwright"
-		return ap
+		return respuestaBase
 	}
 	defer page.Close()
 
@@ -401,7 +411,7 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 	}); err != nil {
 		log.Printf("[Worker-%d] Error navegando para %s: %v", workerID, ap.APName, err)
 		ap.Status = "Error cargando URL"
-		return ap
+		return respuestaBase
 	}
 
 	// 1) Coordenadas
@@ -451,16 +461,19 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 
 	azimuthLimpio := reNumeros.ReplaceAllString(ap.Azimut, "")
 	if azimuthLimpio != "" {
-		if !ensureAzimuthCommitted(page, workerID, ap.APName, azimuthLimpio) {
-			log.Printf("[Worker-%d] azimut no confirmado para %s (esperado %q); se omite #showFilter para no pintar RF erróneo", workerID, ap.APName, azimuthLimpio)
-			ap.Status = "Azimut no confirmado; RF omitido"
+		if !ensureAzimuthCommitted(page, workerID, ap.APName, azimuthLimpio) { // Asumo que también la tienes
+			log.Printf("[Worker-%d] azimut no confirmado para %s (esperado %q); se omite #showFilter", workerID, ap.APName, azimuthLimpio)
+			respuestaBase.Torre.Status = "Azimut no confirmado; RF omitido"
+
+			// Tomamos captura del error para debug, pero retornamos false
+			rutaError := fmt.Sprintf("./capturas/%s_AP_%d_%s_error.png", safeName, i, ap.APName)
 			if _, err := page.Screenshot(playwright.PageScreenshotOptions{
-				Path:     playwright.String(fmt.Sprintf("%s_AP_%d_%s_resultado.png", safeName, i, ap.APName)),
+				Path:     playwright.String(rutaError),
 				FullPage: playwright.Bool(true),
 			}); err != nil {
 				log.Printf("[Worker-%d] fallo screenshot tras fallo azimut %s: %v", workerID, ap.APName, err)
 			}
-			return ap
+			return respuestaBase
 		}
 	}
 
@@ -483,16 +496,56 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 	// Pequeña espera para que se re-rendericen los tiles tras el último clic
 	page.WaitForTimeout(1200)
 
+	// EXTRACCIÓN, CAPTURA, MATEMÁTICA Y VISIÓN ---
+
+	// A. Datos de torre desde el resultado Link Path (sin depender del DOM de EditCoverages)
+	alignExtraido := torre.Alignment
+	latTorreStr := torre.Latitude
+	lonTorreStr := torre.Longitude
+	statusExtraido := "Validación visual generada"
+
+	// B. Tomar el screenshot para OpenCV
+	rutaScreenshot := fmt.Sprintf("./capturas/%s_AP_%d_%s_resultado.png", safeName, i, ap.APName)
 	if _, err := page.Screenshot(playwright.PageScreenshotOptions{
-		Path:     playwright.String(fmt.Sprintf("%s_AP_%d_%s_resultado.png", safeName, i, ap.APName)),
+		Path:     playwright.String(rutaScreenshot),
 		FullPage: playwright.Bool(true),
 	}); err != nil {
 		log.Printf("[Worker-%d] fallo screenshot para %s: %v", workerID, ap.APName, err)
+		statusExtraido = "Fallo al capturar imagen"
 	}
 
-	ap.Status = "Validación visual generada"
-	log.Printf("[Worker-%d] ✅ AP [%d] %s listo en %s", workerID, i+1, ap.APName, time.Since(startWorker).Round(time.Second))
-	return ap
+	// C. Calcular Distancia Matemática
+	latClienteFloat, _ := strconv.ParseFloat(latCliente, 64)
+	lonClienteFloat, _ := strconv.ParseFloat(lonCliente, 64)
+	latTorreFloat, _ := strconv.ParseFloat(latTorreStr, 64)
+	lonTorreFloat, _ := strconv.ParseFloat(lonTorreStr, 64)
+
+	distanciaKm := geo.CalcularDistancia(latTorreFloat, lonTorreFloat, latClienteFloat, lonClienteFloat)
+
+	// D. Analizar la imagen con GoCV
+	coberturaViable, errVision := vision.AnalizarCobertura(rutaScreenshot)
+	if errVision != nil {
+		log.Printf("[Worker-%d] Error analizando visión en %s: %v", workerID, ap.APName, errVision)
+		coberturaViable = false
+		statusExtraido = "Error en análisis visual"
+	}
+
+	log.Printf("[Worker-%d] ✅ AP [%d] %s listo en %s. Cobertura: %t, Distancia: %.2f km", workerID, i+1, ap.APName, time.Since(startWorker).Round(time.Second), coberturaViable, distanciaKm)
+
+	// E. Retornar JSON plano para el agente IA
+	return models.RespuestaMCP{
+		Torre: models.DatosTorre{
+			Align:    alignExtraido, // Viene directo del objeto torre
+			Tilt:     ap.Tilt,       // Viene directo de la base de datos
+			Status:   statusExtraido,
+			Latitud:  latTorreFloat,
+			Longitud: lonTorreFloat,
+		},
+		Antena:    ap.APName,
+		Tipo:      ap.Tipo,
+		Distancia: distanciaKm,
+		Cobertura: coberturaViable,
+	}
 }
 
 // zoomOutMap aleja el mapa probando, en orden, lo que realmente mueve el widget del mapa:

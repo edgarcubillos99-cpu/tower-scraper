@@ -49,6 +49,9 @@ func NewDBClient(cfg *config.Config) (*DBClient, error) {
 	}
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
+		if cfg.DBPass == "" {
+			return nil, fmt.Errorf("ping MySQL falló con DB_PASS vacío (suele verse como 'using password: NO'); revisa .env y docker-compose: %w", err)
+		}
 		return nil, fmt.Errorf("error haciendo ping a MySQL: %w", err)
 	}
 	return &DBClient{conn: db}, nil

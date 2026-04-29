@@ -7,6 +7,24 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// loadDotEnv aplica variables desde ficheros típicos. Usa Overload para que valores
+// del .env prevalezcan sobre variables vacías (p. ej. DB_PASS="" inyectado por compose
+// antiguo o por el shell), lo que en MySQL aparece como "using password: NO".
+func loadDotEnv() {
+	for _, p := range []string{"/app/.env", ".env"} {
+		_ = godotenv.Overload(p)
+	}
+}
+
+func firstEnv(keys ...string) string {
+	for _, k := range keys {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 type Config struct {
 	Username  string
 	Password  string
@@ -19,14 +37,14 @@ type Config struct {
 }
 
 func LoadConfig() *Config {
-	_ = godotenv.Load()
+	loadDotEnv()
 
 	appPort := getEnvOrDefault("APP_PORT", "8080")
 	username := os.Getenv("TOWER_USERNAME")
 	password := os.Getenv("TOWER_PASSWORD")
 	dbHost := os.Getenv("DB_HOST")
 	dbUser := os.Getenv("DB_USER")
-	dbPass := os.Getenv("DB_PASS")
+	dbPass := firstEnv("DB_PASS", "DB_PASSWORD", "MYSQL_ROOT_PASSWORD")
 	dbName := os.Getenv("DB_NAME")
 
 	if username == "" || password == "" {
