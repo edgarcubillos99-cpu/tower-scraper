@@ -1,30 +1,19 @@
-# Usamos una imagen base oficial de Go sobre Debian (necesario para las librerías de Playwright)
-FROM golang:1.25-bookworm
+FROM ghcr.io/hybridgroup/opencv:4.10.0
 
-# Establecemos el directorio de trabajo
 WORKDIR /app
 
-# Copiamos los archivos de gestión de dependencias
 COPY go.mod go.sum ./
-
-# Descargamos las dependencias de Go
 RUN go mod download
 
-# Copiamos el resto del código fuente
 COPY . .
 
-# Compilamos el binario fuera de /app para que no lo tape un bind mount
-RUN go build -o /usr/local/bin/tower-scraper cmd/scraper/main.go
+RUN CGO_ENABLED=1 GOOS=linux go build -o /usr/local/bin/tower-scraper cmd/scraper/main.go
 
-# Instalamos los navegadores de Playwright y todas las dependencias del SO necesarias (--with-deps)
-RUN go run github.com/playwright-community/playwright-go/cmd/playwright@latest install --with-deps
+# Al no poner @version, Go usa inteligentemente la que esté en tu go.mod
+RUN go run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps
 
-# Exponemos el puerto definido por defecto
 EXPOSE 8080
-
-# Definimos variables de entorno por defecto para el contenedor
 ENV MCP_TRANSPORT=sse
 ENV APP_PORT=8080
 
-# Comando de ejecución
 CMD ["tower-scraper"]

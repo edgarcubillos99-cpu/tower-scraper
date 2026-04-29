@@ -12,7 +12,6 @@ import (
 	"tower-scraper/internal/db"
 	"tower-scraper/internal/geo"
 	"tower-scraper/internal/models"
-	"tower-scraper/internal/vision"
 
 	"github.com/playwright-community/playwright-go"
 )
@@ -500,8 +499,6 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 
 	// A. Datos de torre desde el resultado Link Path (sin depender del DOM de EditCoverages)
 	alignExtraido := torre.Alignment
-	latTorreStr := torre.Latitude
-	lonTorreStr := torre.Longitude
 	statusExtraido := "Validación visual generada"
 
 	// B. Tomar el screenshot para OpenCV
@@ -514,21 +511,38 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 		statusExtraido = "Fallo al capturar imagen"
 	}
 
-	// C. Calcular Distancia Matemática
+	// C. Calcular Distancia Matemática usando los datos que vienen desde GetTowersData
 	latClienteFloat, _ := strconv.ParseFloat(latCliente, 64)
 	lonClienteFloat, _ := strconv.ParseFloat(lonCliente, 64)
-	latTorreFloat, _ := strconv.ParseFloat(latTorreStr, 64)
-	lonTorreFloat, _ := strconv.ParseFloat(lonTorreStr, 64)
+	latTorreFloat, _ := strconv.ParseFloat(torre.Latitude, 64)
+	lonTorreFloat, _ := strconv.ParseFloat(torre.Longitude, 64)
 
 	distanciaKm := geo.CalcularDistancia(latTorreFloat, lonTorreFloat, latClienteFloat, lonClienteFloat)
 
 	// D. Analizar la imagen con GoCV
-	coberturaViable, errVision := vision.AnalizarCobertura(rutaScreenshot)
-	if errVision != nil {
-		log.Printf("[Worker-%d] Error analizando visión en %s: %v", workerID, ap.APName, errVision)
-		coberturaViable = false
-		statusExtraido = "Error en análisis visual"
-	}
+	/*
+		coberturaViable, errVision := vision.AnalizarCobertura(rutaScreenshot)
+		if errVision != nil {
+			log.Printf("[Worker-%d] Error analizando visión en %s: %v", workerID, ap.APName, errVision)
+			coberturaViable = false
+			statusExtraido = "Error en análisis visual"
+		}
+	*/
+
+	// D. NUEVO: CÁLCULO MATEMÁTICO DE COBERTURA
+	// 1. Extraemos solo los números del azimut de la base de datos
+	azimutStr := reNumeros.ReplaceAllString(ap.Azimut, "")
+	azimutFloat, _ := strconv.ParseFloat(azimutStr, 64)
+
+	// 2. Calculamos el ángulo desde la torre hacia el cliente
+	bearingCliente := geo.CalcularAngulo(latTorreFloat, lonTorreFloat, latClienteFloat, lonClienteFloat)
+
+	// 3. Verificamos si cae en el cono (90 grados de apertura)
+	beamwidth := 90.0
+	coberturaViable := geo.EstaEnCobertura(azimutFloat, bearingCliente, beamwidth)
+
+	log.Printf("[Worker-%d] ✅ AP [%d] %s. Dist: %.2f km | Azimut AP: %.2f° | Ángulo a Cliente: %.2f° | En Cono: %t",
+		workerID, i+1, ap.APName, distanciaKm, azimutFloat, bearingCliente, coberturaViable)
 
 	log.Printf("[Worker-%d] ✅ AP [%d] %s listo en %s. Cobertura: %t, Distancia: %.2f km", workerID, i+1, ap.APName, time.Since(startWorker).Round(time.Second), coberturaViable, distanciaKm)
 
