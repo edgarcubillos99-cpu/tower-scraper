@@ -7,16 +7,19 @@ import (
 	"strings"
 	"tower-scraper/internal/config"
 
+	"tower-scraper/internal/models"
+
 	"github.com/go-sql-driver/mysql"
 )
 
 type APInfo struct {
-	APName string `json:"ap_name"`
-	Tipo   string `json:"tipo"`
-	Azimut string `json:"azimut"`
-	Tilt   string `json:"tilt"`
-	Altura string `json:"altura"`
-	Status string `json:"status,omitempty"` // Para marcar si pasó la prueba de cobertura
+	APName    string `json:"ap_name"`
+	Tipo      string `json:"tipo"`
+	Azimut    string `json:"azimut"`
+	Tilt      string `json:"tilt"`
+	Altura    string `json:"altura"`
+	IPAddress string `json:"ip_address,omitempty"`
+	Status    string `json:"status,omitempty"` // Para marcar si pasó la prueba de cobertura
 }
 
 type DBClient struct {
@@ -61,7 +64,7 @@ func NewDBClient(cfg *config.Config) (*DBClient, error) {
 func (c *DBClient) ObtenerAPsPorTorre(nombreTorreTC string) ([]APInfo, error) {
 	nombreLimpio := strings.ReplaceAll(nombreTorreTC, "OSN.", "")
 	nombreLimpio = strings.TrimSpace(nombreLimpio)
-	query := `SELECT a.ap_name, a.azimut, a.tilt, a.altura, a.tipo 
+	query := `SELECT a.ap_name, a.azimut, a.tilt, a.altura, a.tipo, a.ip_address
           FROM dispositivos_ap a 
           WHERE a.torre_nombre LIKE ?`
 
@@ -77,9 +80,48 @@ func (c *DBClient) ObtenerAPsPorTorre(nombreTorreTC string) ([]APInfo, error) {
 	var aps []APInfo
 	for rows.Next() {
 		var ap APInfo
-		if err := rows.Scan(&ap.APName, &ap.Azimut, &ap.Tilt, &ap.Altura, &ap.Tipo); err != nil {
+		var ip sql.NullString
+		if err := rows.Scan(&ap.APName, &ap.Azimut, &ap.Tilt, &ap.Altura, &ap.Tipo, &ip); err != nil {
 			return nil, err
 		}
+		if ip.Valid {
+			ap.IPAddress = strings.TrimSpace(ip.String)
+		}
+		aps = append(aps, ap)
+	}
+	return aps, nil
+}
+
+func GetAPsByTower(db *sql.DB, towerName string) ([]models.AccessPoint, error) {
+	query := `
+		SELECT id, torre_nombre, ap_name, tipo, azimut, tilt, altura, ip_address 
+		FROM dispositivos_ap 
+		WHERE torre_nombre = ?`
+
+	rows, err := db.Query(query, towerName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var aps []models.AccessPoint
+	for rows.Next() {
+		var ap models.AccessPoint
+		// Es importante manejar el NULL si alguna IP quedó vacía (sql.NullString)
+		var ip sql.NullString
+
+		err := rows.Scan(
+			&ap.ID, &ap.TowerName, &ap.APName, &ap.Tipo,
+			&ap.Azimut, &ap.Tilt, &ap.Altura, &ip,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if ip.Valid {
+			ap.IPAddress = ip.String
+		}
+
 		aps = append(aps, ap)
 	}
 	return aps, nil

@@ -12,6 +12,7 @@ import (
 	"tower-scraper/internal/db"
 	"tower-scraper/internal/geo"
 	"tower-scraper/internal/models"
+	"tower-scraper/internal/snmp"
 
 	"github.com/playwright-community/playwright-go"
 )
@@ -388,9 +389,10 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 
 	// Estructura base para retornos en caso de error prematuro
 	respuestaBase := models.RespuestaMCP{
-		Antena:    ap.APName,
-		Tipo:      ap.Tipo,
-		Cobertura: false,
+		Antena:      ap.APName,
+		Tipo:        ap.Tipo,
+		Cobertura:   false,
+		NombreTorre: torre.TowerName,
 	}
 
 	page, err := s.context.NewPage()
@@ -547,7 +549,7 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 	log.Printf("[Worker-%d] ✅ AP [%d] %s listo en %s. Cobertura: %t, Distancia: %.2f km", workerID, i+1, ap.APName, time.Since(startWorker).Round(time.Second), coberturaViable, distanciaKm)
 
 	// E. Retornar JSON plano para el agente IA
-	return models.RespuestaMCP{
+	out := models.RespuestaMCP{
 		Torre: models.DatosTorre{
 			Align:    alignExtraido, // Viene directo del objeto torre
 			Tilt:     ap.Tilt,       // Viene directo de la base de datos
@@ -555,11 +557,31 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 			Latitud:  latTorreFloat,
 			Longitud: lonTorreFloat,
 		},
-		Antena:    ap.APName,
-		Tipo:      ap.Tipo,
-		Distancia: distanciaKm,
-		Cobertura: coberturaViable,
+		Antena:      ap.APName,
+		Tipo:        ap.Tipo,
+		Distancia:   distanciaKm,
+		Cobertura:   coberturaViable,
+		NombreTorre: torre.TowerName,
 	}
+
+	if coberturaViable && strings.TrimSpace(ap.IPAddress) != "" {
+		st, err := snmp.CheckSaturation(models.AccessPoint{
+			TowerName: torre.TowerName,
+			APName:    ap.APName,
+			Tipo:      ap.Tipo,
+			IPAddress: strings.TrimSpace(ap.IPAddress),
+		})
+		if err != nil {
+			log.Printf("[Worker-%d] SNMP clientes para %s: %v", workerID, ap.APName, err)
+		} else {
+			n := st.Clients
+			out.ClientesConectados = &n
+		}
+	} else if coberturaViable {
+		log.Printf("[Worker-%d] Cobertura OK pero sin IP en BD para %s; se omite SNMP", workerID, ap.APName)
+	}
+
+	return out
 }
 
 // zoomOutMap aleja el mapa probando, en orden, lo que realmente mueve el widget del mapa:

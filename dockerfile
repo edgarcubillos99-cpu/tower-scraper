@@ -2,6 +2,9 @@ FROM ghcr.io/hybridgroup/opencv:4.10.0
 
 WORKDIR /app
 
+# go.mod pide >= 1.24; la imagen OpenCV trae Go 1.23 → descargar toolchain automáticamente
+ENV GOTOOLCHAIN=auto
+
 COPY go.mod go.sum ./
 RUN go mod download
 
