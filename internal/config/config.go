@@ -31,6 +31,7 @@ type Config struct {
 	AppPort   string
 	MCPAPIKey string // Si no está vacía, /sse y /message exigen Authorization: Bearer <valor>
 	DBHost    string
+	DBPort    string // vacío se interpreta como 3306 en db.NewDBClient
 	DBUser    string
 	DBPass    string
 	DBName    string
@@ -43,6 +44,7 @@ func LoadConfig() *Config {
 	username := os.Getenv("TOWER_USERNAME")
 	password := os.Getenv("TOWER_PASSWORD")
 	dbHost := os.Getenv("DB_HOST")
+	dbPort := os.Getenv("DB_PORT")
 	dbUser := os.Getenv("DB_USER")
 	dbPass := firstEnv("DB_PASS", "DB_PASSWORD", "MYSQL_ROOT_PASSWORD")
 	dbName := os.Getenv("DB_NAME")
@@ -57,6 +59,7 @@ func LoadConfig() *Config {
 		AppPort:   appPort,
 		MCPAPIKey: os.Getenv("MCP_API_KEY"),
 		DBHost:    dbHost,
+		DBPort:    dbPort,
 		DBUser:    dbUser,
 		DBPass:    dbPass,
 		DBName:    dbName,

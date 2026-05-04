@@ -26,14 +26,17 @@ type DBClient struct {
 	conn *sql.DB
 }
 
-func mysqlAddr(host string) string {
+func mysqlAddr(host, port string) string {
+	if port == "" {
+		port = "3306"
+	}
 	if _, _, err := net.SplitHostPort(host); err == nil {
 		return host
 	}
-	return net.JoinHostPort(host, "3306")
+	return net.JoinHostPort(host, port)
 }
 
-// NewDBClient inicializa la conexión usando DB_HOST, DB_USER, DB_PASS y DB_NAME del entorno (.env).
+// NewDBClient inicializa la conexión usando DB_HOST, DB_PORT (por defecto 3306), DB_USER, DB_PASS y DB_NAME del entorno (.env).
 func NewDBClient(cfg *config.Config) (*DBClient, error) {
 	if cfg.DBHost == "" || cfg.DBUser == "" || cfg.DBName == "" {
 		return nil, fmt.Errorf("faltan DB_HOST, DB_USER o DB_NAME en el entorno")
@@ -42,7 +45,7 @@ func NewDBClient(cfg *config.Config) (*DBClient, error) {
 		User:                 cfg.DBUser,
 		Passwd:               cfg.DBPass,
 		Net:                  "tcp",
-		Addr:                 mysqlAddr(cfg.DBHost),
+		Addr:                 mysqlAddr(cfg.DBHost, cfg.DBPort),
 		DBName:               cfg.DBName,
 		AllowNativePasswords: true,
 	}
