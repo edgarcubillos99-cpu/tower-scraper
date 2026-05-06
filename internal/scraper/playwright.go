@@ -17,10 +17,20 @@ import (
 	"github.com/playwright-community/playwright-go"
 )
 
+// skipRFConeWebRender evita la fase lenta de Playwright en EditCoverages (búsqueda de cliente,
+// beamwidth, #showFilter, zoom y captura del mapa con el cono RF). La cobertura se determina
+// solo con trigonometría (azimut AP vs bearing al cliente). Pon en false para restaurar el flujo anterior.
+const skipRFConeWebRender = true
+
+var reNumerosAzimutAltura = regexp.MustCompile(`[^\d.]`)
+
 type TowerScraper struct {
 	pw      *playwright.Playwright
 	browser playwright.Browser
 	context playwright.BrowserContext
+	// pwMu serializa el uso del BrowserContext entre peticiones HTTP/MCP concurrentes
+	// (varias pestañas en la misma request siguen en paralelo dentro de TestAPCoverage).
+	pwMu sync.Mutex
 }
 
 // NewTowerScraper inicializa Playwright y el navegador.
@@ -117,6 +127,9 @@ func (s *TowerScraper) Login(username, password string) error {
 
 // GetTowersData navega a la URL del mapa inyectando latitud y longitud.
 func (s *TowerScraper) GetTowersData(lat, lon string) ([]models.TowerCoverage, error) {
+	s.pwMu.Lock()
+	defer s.pwMu.Unlock()
+
 	log.Printf("Consultando cobertura para Lat: %s, Lon: %s...", lat, lon)
 
 	page, err := s.context.NewPage()
@@ -283,70 +296,80 @@ func extractMiles(raw string) float64 {
 
 // TestAPCoverage navega a Coverages, busca la torre, entra en ella y simula la configuración de sus APs
 func (s *TowerScraper) TestAPCoverage(torre models.TowerCoverage, aps []db.APInfo, latCliente, lonCliente string) ([]models.RespuestaMCP, error) {
+	if !skipRFConeWebRender {
+		s.pwMu.Lock()
+		defer s.pwMu.Unlock()
+	}
+
 	towerName := torre.TowerName
 	safeName := strings.ReplaceAll(towerName, " ", "_")
 	safeName = strings.ReplaceAll(safeName, "/", "-")
 
 	log.Printf("Iniciando validación en la torre: %s para %d APs", towerName, len(aps))
 
-	page, err := s.context.NewPage()
-	if err != nil {
-		return nil, fmt.Errorf("error creando página de validación: %v", err)
-	}
-	// No usamos defer page.Close() aquí para poder cerrarla anticipadamente y liberar RAM
-
-	if _, err = page.Goto("https://www.towercoverage.com/En-US/Coverages", playwright.PageGotoOptions{
-		Timeout: playwright.Float(60000),
-	}); err != nil {
-		return nil, fmt.Errorf("error navegando a Coverages: %v", err)
-	}
-
-	searchLocator := page.Locator("input.tablesorter-filter[data-column='1']").First()
-	if err := searchLocator.WaitFor(playwright.LocatorWaitForOptions{
-		State: playwright.WaitForSelectorStateVisible,
-	}); err != nil {
-		return nil, fmt.Errorf("error esperando input de búsqueda en coverages: %w", err)
-	}
-
-	if err := searchLocator.Fill(towerName); err != nil {
-		return nil, fmt.Errorf("error escribiendo en input: %w", err)
-	}
-	searchLocator.Press("Enter")
-	page.WaitForTimeout(1500)
-
-	rowLocators := page.Locator("tr[role='row']:not(.tablesorter-filter-row)")
-	count, err := rowLocators.Count()
-	if err != nil || count == 0 {
-		return nil, fmt.Errorf("sin filas de datos para la torre %q", towerName)
-	}
-
-	var selectedRow playwright.Locator
-	for i := 0; i < count; i++ {
-		row := rowLocators.Nth(i)
-		listNameText, _ := row.Locator("td.listName").InnerText()
-		listNameText = strings.TrimSpace(listNameText)
-
-		if strings.Contains(strings.ToLower(listNameText), strings.ToLower(towerName)) {
-			selectedRow = row
-			break
+	var towerURL string
+	if skipRFConeWebRender {
+		log.Printf("Modo rápido: se omite Coverages + render del cono RF en web; solo trigonometría concurrente.")
+	} else {
+		page, err := s.context.NewPage()
+		if err != nil {
+			return nil, fmt.Errorf("error creando página de validación: %v", err)
 		}
-	}
+		// No usamos defer page.Close() aquí para poder cerrarla anticipadamente y liberar RAM
 
-	if selectedRow == nil {
-		return nil, fmt.Errorf("sin coincidencia de texto en tabla para %q", towerName)
-	}
+		if _, err = page.Goto("https://www.towercoverage.com/En-US/Coverages", playwright.PageGotoOptions{
+			Timeout: playwright.Float(60000),
+		}); err != nil {
+			return nil, fmt.Errorf("error navegando a Coverages: %v", err)
+		}
 
-	// Extraer la URL directa de la torre
-	editLink := selectedRow.Locator("td.listName a").First()
-	href, err := editLink.GetAttribute("href")
-	if err != nil {
-		return nil, fmt.Errorf("no se pudo extraer la URL de la torre: %v", err)
-	}
-	towerURL := "https://www.towercoverage.com" + href
+		searchLocator := page.Locator("input.tablesorter-filter[data-column='1']").First()
+		if err := searchLocator.WaitFor(playwright.LocatorWaitForOptions{
+			State: playwright.WaitForSelectorStateVisible,
+		}); err != nil {
+			return nil, fmt.Errorf("error esperando input de búsqueda en coverages: %w", err)
+		}
 
-	// Cerramos la pestaña general, ya no la necesitamos. Cada worker abrirá la suya.
-	page.Close()
-	log.Printf("URL directa obtenida: %s. Iniciando Worker Pool...", towerURL)
+		if err := searchLocator.Fill(towerName); err != nil {
+			return nil, fmt.Errorf("error escribiendo en input: %w", err)
+		}
+		searchLocator.Press("Enter")
+		page.WaitForTimeout(1500)
+
+		rowLocators := page.Locator("tr[role='row']:not(.tablesorter-filter-row)")
+		count, err := rowLocators.Count()
+		if err != nil || count == 0 {
+			return nil, fmt.Errorf("sin filas de datos para la torre %q", towerName)
+		}
+
+		var selectedRow playwright.Locator
+		for i := 0; i < count; i++ {
+			row := rowLocators.Nth(i)
+			listNameText, _ := row.Locator("td.listName").InnerText()
+			listNameText = strings.TrimSpace(listNameText)
+
+			if strings.Contains(strings.ToLower(listNameText), strings.ToLower(towerName)) {
+				selectedRow = row
+				break
+			}
+		}
+
+		if selectedRow == nil {
+			return nil, fmt.Errorf("sin coincidencia de texto en tabla para %q", towerName)
+		}
+
+		// Extraer la URL directa de la torre
+		editLink := selectedRow.Locator("td.listName a").First()
+		href, err := editLink.GetAttribute("href")
+		if err != nil {
+			return nil, fmt.Errorf("no se pudo extraer la URL de la torre: %v", err)
+		}
+		towerURL = "https://www.towercoverage.com" + href
+
+		// Cerramos la pestaña general, ya no la necesitamos. Cada worker abrirá la suya.
+		page.Close()
+		log.Printf("URL directa obtenida: %s. Iniciando Worker Pool...", towerURL)
+	}
 
 	var resultadosFinales []models.RespuestaMCP
 	var wg sync.WaitGroup
@@ -395,122 +418,127 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 		NombreTorre: torre.TowerName,
 	}
 
-	page, err := s.context.NewPage()
-	if err != nil {
-		log.Printf("[Worker-%d] Error creando pestaña para %s: %v", workerID, ap.APName, err)
-		ap.Status = "Error de Pestaña Playwright"
-		return respuestaBase
-	}
-	defer page.Close()
+	var alignExtraido string
+	var statusExtraido string
 
-	// Timeout por defecto bajo para que ningún locator cuelgue 30s reintentando actionability
-	page.SetDefaultTimeout(8000)
-
-	if _, err := page.Goto(towerURL, playwright.PageGotoOptions{
-		Timeout:   playwright.Float(60000),
-		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
-	}); err != nil {
-		log.Printf("[Worker-%d] Error navegando para %s: %v", workerID, ap.APName, err)
-		ap.Status = "Error cargando URL"
-		return respuestaBase
-	}
-
-	// 1) Coordenadas
-	if err := page.Locator("#address").Fill(fmt.Sprintf("%s, %s", latCliente, lonCliente)); err != nil {
-		log.Printf("[Worker-%d] fallo #address para %s: %v", workerID, ap.APName, err)
-	}
-	if err := page.Locator("input.newbutton[value='Search']").Click(); err != nil {
-		log.Printf("[Worker-%d] fallo click Search para %s: %v", workerID, ap.APName, err)
-	}
-	// La búsqueda repinta el mapa y a veces rehace el formulario; esperar red antes de tocar parámetros.
-	_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
-		State:   playwright.LoadStateNetworkidle,
-		Timeout: playwright.Float(15000),
-	})
-
-	// Hay que elegir alguna opción del sistema de radio (índice 1 = primera opción distinta del placeholder).
-	if _, err := page.Locator("#RadioSystemList").SelectOption(playwright.SelectOptionValues{Indexes: &[]int{1}}); err != nil {
-		log.Printf("[Worker-%d] fallo SelectOption RadioSystem para %s: %v", workerID, ap.APName, err)
-	}
-	_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
-		State:   playwright.LoadStateNetworkidle,
-		Timeout: playwright.Float(12000),
-	})
-
-	// 2) Antenna Height → Beamwidth (90) → Azimuth al final. El beamwidth puede disparar recálculo del formulario
-	// y dejar el azimut en 0 si lo rellenamos antes; por eso no se llama a #showFilter hasta que #Azimuth coincida con la BD.
-	reNumeros := regexp.MustCompile(`[^\d.]`)
-	alturaLimpia := reNumeros.ReplaceAllString(ap.Altura, "")
-	if alturaLimpia != "" {
-		alturaInput := page.Locator("#AntennaHeightfeet")
-		if err := alturaInput.WaitFor(playwright.LocatorWaitForOptions{
-			State:   playwright.WaitForSelectorStateVisible,
-			Timeout: playwright.Float(4000),
-		}); err == nil {
-			_ = alturaInput.Fill(alturaLimpia)
-			_ = alturaInput.Blur()
-		} else {
-			_, _ = page.Evaluate(fmt.Sprintf(`document.getElementById("AntennaHeightfeet").value = "%s";`, alturaLimpia))
-		}
-	}
-
-	setBeamwidthFilterFixed(page, "90")
-	_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
-		State:   playwright.LoadStateNetworkidle,
-		Timeout: playwright.Float(10000),
-	})
-
-	azimuthLimpio := reNumeros.ReplaceAllString(ap.Azimut, "")
-	if azimuthLimpio != "" {
-		if !ensureAzimuthCommitted(page, workerID, ap.APName, azimuthLimpio) { // Asumo que también la tienes
-			log.Printf("[Worker-%d] azimut no confirmado para %s (esperado %q); se omite #showFilter", workerID, ap.APName, azimuthLimpio)
-			respuestaBase.Torre.Status = "Azimut no confirmado; RF omitido"
-
-			// Tomamos captura del error para debug, pero retornamos false
-			rutaError := fmt.Sprintf("./capturas/%s_AP_%d_%s_error.png", safeName, i, ap.APName)
-			if _, err := page.Screenshot(playwright.PageScreenshotOptions{
-				Path:     playwright.String(rutaError),
-				FullPage: playwright.Bool(true),
-			}); err != nil {
-				log.Printf("[Worker-%d] fallo screenshot tras fallo azimut %s: %v", workerID, ap.APName, err)
-			}
+	if !skipRFConeWebRender {
+		page, err := s.context.NewPage()
+		if err != nil {
+			log.Printf("[Worker-%d] Error creando pestaña para %s: %v", workerID, ap.APName, err)
+			ap.Status = "Error de Pestaña Playwright"
 			return respuestaBase
 		}
-	}
+		defer page.Close()
 
-	// 3) Ejecutar y esperar a que el render RF termine usando 'networkidle' en vez de sleep ciego.
-	if err := page.Locator("#showFilter").Click(); err != nil {
-		log.Printf("[Worker-%d] fallo click #showFilter para %s: %v", workerID, ap.APName, err)
-	}
-	_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
-		State:   playwright.LoadStateNetworkidle,
-		Timeout: playwright.Float(20000),
-	})
+		// Timeout por defecto bajo para que ningún locator cuelgue 30s reintentando actionability
+		page.SetDefaultTimeout(8000)
 
-	// 4) ALEJAR EL MAPA (ZOOM OUT)
-	t0 := time.Now()
-	if ok := zoomOutMap(page, 2); ok {
-		log.Printf("[Worker-%d] Zoom out OK para %s en %s", workerID, ap.APName, time.Since(t0).Round(time.Millisecond))
+		if _, err := page.Goto(towerURL, playwright.PageGotoOptions{
+			Timeout:   playwright.Float(60000),
+			WaitUntil: playwright.WaitUntilStateDomcontentloaded,
+		}); err != nil {
+			log.Printf("[Worker-%d] Error navegando para %s: %v", workerID, ap.APName, err)
+			ap.Status = "Error cargando URL"
+			return respuestaBase
+		}
+
+		// 1) Coordenadas
+		if err := page.Locator("#address").Fill(fmt.Sprintf("%s, %s", latCliente, lonCliente)); err != nil {
+			log.Printf("[Worker-%d] fallo #address para %s: %v", workerID, ap.APName, err)
+		}
+		if err := page.Locator("input.newbutton[value='Search']").Click(); err != nil {
+			log.Printf("[Worker-%d] fallo click Search para %s: %v", workerID, ap.APName, err)
+		}
+		// La búsqueda repinta el mapa y a veces rehace el formulario; esperar red antes de tocar parámetros.
+		_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+			State:   playwright.LoadStateNetworkidle,
+			Timeout: playwright.Float(15000),
+		})
+
+		// Hay que elegir alguna opción del sistema de radio (índice 1 = primera opción distinta del placeholder).
+		if _, err := page.Locator("#RadioSystemList").SelectOption(playwright.SelectOptionValues{Indexes: &[]int{1}}); err != nil {
+			log.Printf("[Worker-%d] fallo SelectOption RadioSystem para %s: %v", workerID, ap.APName, err)
+		}
+		_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+			State:   playwright.LoadStateNetworkidle,
+			Timeout: playwright.Float(12000),
+		})
+
+		// 2) Antenna Height → Beamwidth (90) → Azimuth al final. El beamwidth puede disparar recálculo del formulario
+		// y dejar el azimut en 0 si lo rellenamos antes; por eso no se llama a #showFilter hasta que #Azimuth coincida con la BD.
+		alturaLimpia := reNumerosAzimutAltura.ReplaceAllString(ap.Altura, "")
+		if alturaLimpia != "" {
+			alturaInput := page.Locator("#AntennaHeightfeet")
+			if err := alturaInput.WaitFor(playwright.LocatorWaitForOptions{
+				State:   playwright.WaitForSelectorStateVisible,
+				Timeout: playwright.Float(4000),
+			}); err == nil {
+				_ = alturaInput.Fill(alturaLimpia)
+				_ = alturaInput.Blur()
+			} else {
+				_, _ = page.Evaluate(fmt.Sprintf(`document.getElementById("AntennaHeightfeet").value = "%s";`, alturaLimpia))
+			}
+		}
+
+		setBeamwidthFilterFixed(page, "90")
+		_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+			State:   playwright.LoadStateNetworkidle,
+			Timeout: playwright.Float(10000),
+		})
+
+		azimuthLimpio := reNumerosAzimutAltura.ReplaceAllString(ap.Azimut, "")
+		if azimuthLimpio != "" {
+			if !ensureAzimuthCommitted(page, workerID, ap.APName, azimuthLimpio) {
+				log.Printf("[Worker-%d] azimut no confirmado para %s (esperado %q); se omite #showFilter", workerID, ap.APName, azimuthLimpio)
+				respuestaBase.Torre.Status = "Azimut no confirmado; RF omitido"
+
+				rutaError := fmt.Sprintf("./capturas/%s_AP_%d_%s_error.png", safeName, i, ap.APName)
+				if _, err := page.Screenshot(playwright.PageScreenshotOptions{
+					Path:     playwright.String(rutaError),
+					FullPage: playwright.Bool(true),
+				}); err != nil {
+					log.Printf("[Worker-%d] fallo screenshot tras fallo azimut %s: %v", workerID, ap.APName, err)
+				}
+				return respuestaBase
+			}
+		}
+
+		// 3) Ejecutar y esperar a que el render RF termine usando 'networkidle' en vez de sleep ciego.
+		if err := page.Locator("#showFilter").Click(); err != nil {
+			log.Printf("[Worker-%d] fallo click #showFilter para %s: %v", workerID, ap.APName, err)
+		}
+		_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+			State:   playwright.LoadStateNetworkidle,
+			Timeout: playwright.Float(20000),
+		})
+
+		// 4) ALEJAR EL MAPA (ZOOM OUT)
+		t0 := time.Now()
+		if ok := zoomOutMap(page, 2); ok {
+			log.Printf("[Worker-%d] Zoom out OK para %s en %s", workerID, ap.APName, time.Since(t0).Round(time.Millisecond))
+		} else {
+			log.Printf("[Worker-%d] No se pudo alejar el mapa para %s (sin botón reconocible)", workerID, ap.APName)
+		}
+		page.WaitForTimeout(1200)
+
+		// EXTRACCIÓN, CAPTURA (cono en mapa web) — la cobertura efectiva sigue decidiéndose abajo con trigonometría.
+
+		alignExtraido = torre.Alignment
+		statusExtraido = "Validación visual generada"
+
+		// Captura del mapa con el cono (legado / depuración); el flag skipRFConeWebRender evita todo este bloque.
+		rutaScreenshot := fmt.Sprintf("./capturas/%s_AP_%d_%s_resultado.png", safeName, i, ap.APName)
+		if _, err := page.Screenshot(playwright.PageScreenshotOptions{
+			Path:     playwright.String(rutaScreenshot),
+			FullPage: playwright.Bool(true),
+		}); err != nil {
+			log.Printf("[Worker-%d] fallo screenshot para %s: %v", workerID, ap.APName, err)
+			statusExtraido = "Fallo al capturar imagen"
+		}
+		_ = rutaScreenshot // reservado si se reactiva análisis por imagen (GoCV)
 	} else {
-		log.Printf("[Worker-%d] No se pudo alejar el mapa para %s (sin botón reconocible)", workerID, ap.APName)
-	}
-	// Pequeña espera para que se re-rendericen los tiles tras el último clic
-	page.WaitForTimeout(1200)
-
-	// EXTRACCIÓN, CAPTURA, MATEMÁTICA Y VISIÓN ---
-
-	// A. Datos de torre desde el resultado Link Path (sin depender del DOM de EditCoverages)
-	alignExtraido := torre.Alignment
-	statusExtraido := "Validación visual generada"
-
-	// B. Tomar el screenshot para OpenCV
-	rutaScreenshot := fmt.Sprintf("./capturas/%s_AP_%d_%s_resultado.png", safeName, i, ap.APName)
-	if _, err := page.Screenshot(playwright.PageScreenshotOptions{
-		Path:     playwright.String(rutaScreenshot),
-		FullPage: playwright.Bool(true),
-	}); err != nil {
-		log.Printf("[Worker-%d] fallo screenshot para %s: %v", workerID, ap.APName, err)
-		statusExtraido = "Fallo al capturar imagen"
+		alignExtraido = torre.Alignment
+		statusExtraido = "Cobertura por trigonometría (sin render del cono RF en web)"
 	}
 
 	// C. Calcular Distancia Matemática usando los datos que vienen desde GetTowersData
@@ -533,7 +561,7 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 
 	// D. NUEVO: CÁLCULO MATEMÁTICO DE COBERTURA
 	// 1. Extraemos solo los números del azimut de la base de datos
-	azimutStr := reNumeros.ReplaceAllString(ap.Azimut, "")
+	azimutStr := reNumerosAzimutAltura.ReplaceAllString(ap.Azimut, "")
 	azimutFloat, _ := strconv.ParseFloat(azimutStr, 64)
 
 	// 2. Calculamos el ángulo desde la torre hacia el cliente
