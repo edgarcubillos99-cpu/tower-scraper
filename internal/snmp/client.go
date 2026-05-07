@@ -12,59 +12,136 @@ import (
 
 // CheckSaturation consulta por SNMP si un AP está saturado
 func CheckSaturation(ap models.AccessPoint) (models.APStatus, error) {
-	// 1. Validar que tengamos IP
-	if ap.IPAddress == "" {
-		return models.APStatus{}, fmt.Errorf("el AP %s no tiene IP asignada", ap.APName)
+	// 1. Defensa contra datos sucios en la IP (NULL o cadena vacía)
+	ipUpper := strings.ToUpper(strings.TrimSpace(ap.IPAddress))
+	if ipUpper == "" || ipUpper == "NULL" {
+		// Retornamos sin error, pero con el estado claro para el JSON
+		return models.APStatus{
+			APName:      ap.APName,
+			Type:        ap.Tipo,
+			IsSaturated: boolPtr(false),
+			Message:     "Sin IP configurada en DB",
+		}, nil
 	}
 
-	// 2. Configurar el cliente SNMP
+	// 2. Normalización agresiva del tipo de antena
+	t := strings.ToLower(ap.Tipo)
+	var oid string
+	var useWaveWalk bool
+
+	// Lógica inclusiva: Atrapa (Rocket AC), Lite AC, ePMP3000 (OMNI), etc.
+	if strings.Contains(t, "epmp") || strings.Contains(t, "cambium") {
+		oid = oidCambium
+	} else if isWaveAPType(t) {
+		// Wave AP (sysName suele contener "WaveAP"): conteo por tabla de estaciones, no el escalar AirMAX.
+		useWaveWalk = true
+	} else if strings.Contains(t, "rocket") ||
+		strings.Contains(t, "lite") ||
+		strings.Contains(t, "ac") ||
+		strings.Contains(t, "ubiquiti") {
+		oid = oidUbiquiti
+	} else {
+		// Atrapa casos como "DESCONOCIDO" u otros modelos no mapeados
+		return models.APStatus{
+			APName:      ap.APName,
+			Type:        ap.Tipo,
+			IsSaturated: boolPtr(false),
+			Message:     "Tipo de equipo sin soporte SNMP mapeado",
+		}, nil
+	}
+
+	// 3. Configurar el cliente SNMP
 	community := os.Getenv("SNMP_COMMUNITY")
 	if community == "" {
-		community = "osnsnmpro" // Fallback por defecto
+		community = "osnsnmpro" // Tu fallback por defecto
+	}
+
+	// Ubiquiti AirMAX AC (Rocket AC, LiteBeam, etc.): la red confirma SNMP v1 en el escalar de clientes.
+	// Cambium / Wave siguen en v2c (GET-BULK / tabla Wave).
+	snmpVersion := gosnmp.Version2c
+	if !useWaveWalk && oid == oidUbiquiti {
+		snmpVersion = gosnmp.Version1
 	}
 
 	snmpClient := &gosnmp.GoSNMP{
 		Target:    ap.IPAddress,
 		Port:      161,
 		Community: community,
-		Version:   gosnmp.Version2c,
+		Version:   snmpVersion,
 		Timeout:   time.Duration(2) * time.Second,
 		Retries:   2,
 	}
 
 	err := snmpClient.Connect()
 	if err != nil {
-		return models.APStatus{}, fmt.Errorf("error conectando a %s: %v", ap.IPAddress, err)
+		// Error de red (timeout, antena apagada, firewall). Lo reportamos en el JSON en lugar de fallar el worker.
+		return models.APStatus{
+			APName:      ap.APName,
+			Type:        ap.Tipo,
+			IsSaturated: boolPtr(false),
+			Message:     fmt.Sprintf("Inalcanzable por red: %v", err),
+		}, nil
 	}
 	defer snmpClient.Conn.Close()
 
-	// 3. Obtener el OID según el tipo de AP (OIDs escalares, usar Get, no Walk).
-	// En BD suele venir el modelo completo (p. ej. ePMP3000, ePMP4500, ePMP4600L), no solo "ePMP".
-	t := strings.ToLower(strings.TrimSpace(ap.Tipo))
-	var oid string
-	switch {
-	case t == "cambium" || strings.HasPrefix(t, "epmp"):
-		oid = oidCambium
-	case t == "ac" || t == "ubiquiti" || strings.HasPrefix(t, "uap"):
-		oid = oidUbiquiti
-	default:
-		return models.APStatus{}, fmt.Errorf("tipo de antena no soportado para SNMP: %s", ap.Tipo)
+	// 4. Conteo de clientes (escalar o walk según familia)
+	var clientesConectados int
+	if useWaveWalk {
+		n, werr := waveStationClientCount(snmpClient)
+		if werr != nil {
+			return models.APStatus{
+				APName:      ap.APName,
+				Type:        ap.Tipo,
+				IsSaturated: boolPtr(false),
+				Message:     werr.Error(),
+			}, nil
+		}
+		clientesConectados = n
+	} else {
+		result, err := snmpClient.Get([]string{oid})
+		if err != nil {
+			return models.APStatus{
+				APName:      ap.APName,
+				Type:        ap.Tipo,
+				IsSaturated: boolPtr(false),
+				Message:     fmt.Sprintf("Error en consulta OID: %v", err),
+			}, nil
+		}
+		if len(result.Variables) > 0 {
+			clientesConectados = intFromSNMPValue(result.Variables[0].Value)
+		}
 	}
 
-	// 4. Ejecutar la consulta
-	result, err := snmpClient.Get([]string{oid})
-	if err != nil {
-		return models.APStatus{}, fmt.Errorf("error en consulta SNMP a %s: %v", ap.IPAddress, err)
-	}
-
-	// 5. Procesar el resultado (Integer, Counter32, Gauge32, etc.)
-	clientesConectados := 0
-	if len(result.Variables) > 0 {
-		clientesConectados = intFromSNMPValue(result.Variables[0].Value)
-	}
-
-	// 6. Evaluar la saturación
+	// 5. Evaluar la saturación
 	return EvaluateAP(ap.Tipo, clientesConectados), nil
+}
+
+func isWaveAPType(t string) bool {
+	return strings.Contains(t, "wave") || strings.Contains(t, "wabe") // "wabe" = typo frecuente de Wave
+}
+
+// waveStationClientCount cuenta estaciones en la tabla Wave (UI-AF60). Si el walk falla, intenta el escalar AirMAX.
+func waveStationClientCount(c *gosnmp.GoSNMP) (int, error) {
+	pdus, walkErr := c.BulkWalkAll(oidWaveAPStaMac)
+	if walkErr == nil {
+		return len(pdus), nil
+	}
+	n, scalarErr := scalarStaCount(c, oidUbiquiti)
+	if scalarErr != nil {
+		return 0, fmt.Errorf("Wave AP: tabla estaciones (%v); respaldo OID AirMAX (%v)", walkErr, scalarErr)
+	}
+	return n, nil
+}
+
+func scalarStaCount(c *gosnmp.GoSNMP, oid string) (int, error) {
+	result, err := c.Get([]string{oid})
+	if err != nil {
+		return 0, err
+	}
+	if len(result.Variables) == 0 {
+		return 0, fmt.Errorf("respuesta SNMP vacía para %s", oid)
+	}
+	return intFromSNMPValue(result.Variables[0].Value), nil
 }
 
 func intFromSNMPValue(v any) int {

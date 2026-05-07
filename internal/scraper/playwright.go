@@ -604,12 +604,27 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 		} else {
 			n := st.Clients
 			out.ClientesConectados = &n
+			applySNMPStatusToRespuesta(&out, st)
 		}
 	} else if coberturaViable {
 		log.Printf("[Worker-%d] Cobertura OK pero sin IP en BD para %s; se omite SNMP", workerID, ap.APName)
 	}
 
 	return out
+}
+
+// applySNMPStatusToRespuesta copia saturación y texto de diagnóstico al JSON MCP.
+// esta_saturado solo se rellena cuando hubo OID válido y EvaluateAP aplicó el umbral (25 clientes).
+func applySNMPStatusToRespuesta(out *models.RespuestaMCP, st models.APStatus) {
+	msg := strings.TrimSpace(st.Message)
+	if cap := strings.TrimSpace(st.EstadoCapacidad); cap != "" {
+		out.EstadoCapacidad = cap
+	} else if msg != "" {
+		out.EstadoCapacidad = msg
+	}
+	if msg == "Saturado" || msg == "Con espacio" {
+		out.EstaSaturado = st.IsSaturated
+	}
 }
 
 // zoomOutMap aleja el mapa probando, en orden, lo que realmente mueve el widget del mapa:
