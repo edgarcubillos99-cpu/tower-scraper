@@ -31,6 +31,8 @@ El sistema permite automatizar la consulta de cobertura en TowerCoverage.com iny
 
    🚀 Ejecución y Despliegue
 
+   🤖 Integración con Agente de IA (n8n + MCP)
+
    🧩 Diseño del Sistema y Filtros
 
    💾 Modelo de Datos (Payloads)
@@ -161,6 +163,54 @@ docker compose logs -f
 
 ---
 
+## 🤖 Integración con Agente de IA (n8n + MCP)
+
+Este proyecto está diseñado para exponer herramientas de contexto (MCP) que son consumidas por un agente de Inteligencia Artificial implementado en **n8n**. El agente automatiza la verificación de factibilidad técnica y cobertura residencial, procesando directamente los tickets de soporte.
+
+### Flujo de Trabajo del Agente
+
+El agente ejecuta un ciclo continuo de validación y respuesta estructurado en las siguientes fases:
+
+#### 1. Escucha y Extracción de Tickets (Ubersmith)
+- **Activación:** Se ejecuta mediante un *Schedule Trigger* en intervalos programados regulares.
+- **Consulta:** Utiliza la herramienta `MCP_ubersmith` para solicitar a la API los tickets que requieren atención (`method=support.ticket_list`, `queue=32`, `type=Open`).
+- **Contexto:** Extrae el `ticket_id` y obtiene el historial de comentarios de cada ticket para ubicar la solicitud de verificación de coordenadas. Mantiene un registro interno para no procesar el mismo ticket dos veces.
+
+#### 2. Evaluación de Coordenadas
+- Identifica la latitud y longitud dentro del texto del ticket.
+- **Prioridad de Relocalización:** Si el ticket reporta una mudanza y contiene tanto coordenadas "Hacia" (nuevo destino) como "Actual", el agente da prioridad estricta a analizar la coordenada "Hacia".
+
+#### 3. Ejecución del Scraper de Coberturas
+- El agente envía las coordenadas definitivas a la herramienta `MCP_coberturas`.
+- Recibe un JSON que contiene: estado general de la cobertura, listado de Access Points (AP) cercanos, recuento de clientes conectados por equipo y errores de lectura (si los hay).
+
+#### 4. Selección Óptima de Access Points
+El agente procesa la respuesta del scraper y selecciona los mejores APs bajo dos criterios estrictos:
+1. **Menor distancia** geométrica al cliente.
+2. **Menor saturación** (menor volumen de clientes conectados actualmente en ese sector).
+
+#### 5. Matriz de Compatibilidad (CPE y Planes)
+Una vez definidos los mejores APs, el agente asigna el equipo cliente (CPE) necesario y los perfiles de velocidad factibles, aplicando la siguiente regla de negocio:
+
+| Familia AP | Modelo de AP | Equipo Cliente (CPE) Sugerido | Planes Soportados (Mbps) |
+| :--- | :--- | :--- | :--- |
+| **Serie 4600** | ePMP4600L, ePMP4600 | Force4625 | 200/50 |
+| **Serie 4500** | ePMP4500L, ePMP4500 | Force4525L, Force300 | 100/20, 50/10, 25/5 |
+| **Serie 3000** | ePMP3000, ePMP3000L | Force300 | 100/20, 50/10, 25/5 |
+| **Serie 2000** | ePMP2000 | Force300 | 50/10, 25/5 |
+| **Ubiquiti** | Cualquier AP AC | LiteBeam AC | 50/10, 25/5 |
+
+#### 6. Respuesta y Manejo de Alertas
+El agente consolida la información y responde automáticamente en el ticket de Ubersmith con el siguiente formato:
+- Resumen claro de la ubicación analizada (Hacia o Actual).
+- Un "Top 3" de las mejores antenas factibles, detallando por cada una: Nombre del AP, Distancia, Clientes actuales, CPE recomendado y Planes aplicables.
+- ⚠️ **Manejo de Errores de Lectura:** Si el `MCP_coberturas` logra identificar una antena óptima pero carece de datos complementarios (ej. *falta azimut* o *no se pudo contar clientes*), el agente incluye la antena en la respuesta, pero le añade una nota explícita: **"Requiere verificación manual de capacidad/azimut por falta de datos en el sistema"**.
+
+![Diagrama de flujo del Agente n8n](assets/flujo-agente.png)
+
+El agente ejecuta un ciclo continuo de validación y respuesta estructurado en las siguientes fases...
+
+---
 # 🧩 Diseño del Sistema
 
 ✔ Espera Inteligente: El scraper no depende de pausas estáticas de tiempo (time.Sleep). Emplea la función WaitForSelector de Playwright para buscar el botón de Sign Out tras el login, y el searchBox (input[placeholder*='Address']) en el mapa, reduciendo los tiempos muertos drásticamente.
