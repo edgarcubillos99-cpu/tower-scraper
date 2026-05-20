@@ -206,7 +206,7 @@ El agente consolida la información y responde automáticamente en el ticket de 
 - Un "Top 3" de las mejores antenas factibles, detallando por cada una: Nombre del AP, Distancia, Clientes actuales, CPE recomendado y Planes aplicables.
 - ⚠️ **Manejo de Errores de Lectura:** Si el `MCP_coberturas` logra identificar una antena óptima pero carece de datos complementarios (ej. *falta azimut* o *no se pudo contar clientes*), el agente incluye la antena en la respuesta, pero le añade una nota explícita: **"Requiere verificación manual de capacidad/azimut por falta de datos en el sistema"**.
 
-![Diagrama de flujo del Agente n8n](assets/flujo-agente.png)
+![Diagrama de flujo del Agente n8n](docs/flujo-agente.png)
 
 El agente ejecuta un ciclo continuo de validación y respuesta estructurado en las siguientes fases...
 
