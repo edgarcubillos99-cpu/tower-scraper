@@ -83,10 +83,13 @@ func (c *DBClient) ObtenerAPsPorTorre(nombreTorreTC string) ([]APInfo, error) {
 	var aps []APInfo
 	for rows.Next() {
 		var ap APInfo
-		var ip sql.NullString
-		if err := rows.Scan(&ap.APName, &ap.Azimut, &ap.Tilt, &ap.Altura, &ap.Tipo, &ip); err != nil {
+		var azimut, tilt, altura, ip sql.NullString
+		if err := rows.Scan(&ap.APName, &azimut, &tilt, &altura, &ap.Tipo, &ip); err != nil {
 			return nil, err
 		}
+		ap.Azimut = nullStringValue(azimut)
+		ap.Tilt = nullStringValue(tilt)
+		ap.Altura = nullStringValue(altura)
 		if ip.Valid {
 			ap.IPAddress = strings.TrimSpace(ip.String)
 		}
@@ -110,22 +113,31 @@ func GetAPsByTower(db *sql.DB, towerName string) ([]models.AccessPoint, error) {
 	var aps []models.AccessPoint
 	for rows.Next() {
 		var ap models.AccessPoint
-		// Es importante manejar el NULL si alguna IP quedó vacía (sql.NullString)
-		var ip sql.NullString
+		var azimut, tilt, altura, ip sql.NullString
 
 		err := rows.Scan(
 			&ap.ID, &ap.TowerName, &ap.APName, &ap.Tipo,
-			&ap.Azimut, &ap.Tilt, &ap.Altura, &ip,
+			&azimut, &tilt, &altura, &ip,
 		)
 		if err != nil {
 			return nil, err
 		}
 
+		ap.Azimut = nullStringValue(azimut)
+		ap.Tilt = nullStringValue(tilt)
+		ap.Altura = nullStringValue(altura)
 		if ip.Valid {
-			ap.IPAddress = ip.String
+			ap.IPAddress = strings.TrimSpace(ip.String)
 		}
 
 		aps = append(aps, ap)
 	}
 	return aps, nil
+}
+
+func nullStringValue(ns sql.NullString) string {
+	if ns.Valid {
+		return strings.TrimSpace(ns.String)
+	}
+	return ""
 }

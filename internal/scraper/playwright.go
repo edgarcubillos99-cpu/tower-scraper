@@ -418,6 +418,8 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 		NombreTorre: torre.TowerName,
 	}
 
+	beamwidth := geo.ObtenerApertura(ap.Tipo)
+
 	var alignExtraido string
 	var statusExtraido string
 
@@ -480,13 +482,16 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 			}
 		}
 
-		setBeamwidthFilterFixed(page, "90")
+		setBeamwidthFilterFixed(page, strconv.FormatFloat(beamwidth, 'f', 0, 64))
 		_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
 			State:   playwright.LoadStateNetworkidle,
 			Timeout: playwright.Float(10000),
 		})
 
-		azimuthLimpio := reNumerosAzimutAltura.ReplaceAllString(ap.Azimut, "")
+		azimuthLimpio := ""
+		if azimutFloat, azimutOK := geo.ParsearAzimut(ap.Azimut); azimutOK {
+			azimuthLimpio = strconv.FormatFloat(azimutFloat, 'f', -1, 64)
+		}
 		if azimuthLimpio != "" {
 			if !ensureAzimuthCommitted(page, workerID, ap.APName, azimuthLimpio) {
 				log.Printf("[Worker-%d] azimut no confirmado para %s (esperado %q); se omite #showFilter", workerID, ap.APName, azimuthLimpio)
@@ -559,20 +564,19 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 		}
 	*/
 
-	// D. NUEVO: CÁLCULO MATEMÁTICO DE COBERTURA
-	// 1. Extraemos solo los números del azimut de la base de datos
-	azimutStr := reNumerosAzimutAltura.ReplaceAllString(ap.Azimut, "")
-	azimutFloat, _ := strconv.ParseFloat(azimutStr, 64)
-
-	// 2. Calculamos el ángulo desde la torre hacia el cliente
+	// D. Cálculo matemático de cobertura (beamwidth según tipo Wave/Wabe u otros)
+	azimutFloat, azimutOK := geo.ParsearAzimut(ap.Azimut)
 	bearingCliente := geo.CalcularAngulo(latTorreFloat, lonTorreFloat, latClienteFloat, lonClienteFloat)
 
-	// 3. Verificamos si cae en el cono (90 grados de apertura)
-	beamwidth := 90.0
-	coberturaViable := geo.EstaEnCobertura(azimutFloat, bearingCliente, beamwidth)
+	coberturaViable := false
+	if azimutOK {
+		coberturaViable = geo.EstaEnCobertura(azimutFloat, bearingCliente, beamwidth)
+	} else {
+		statusExtraido = strings.TrimSpace(statusExtraido + "; azimut no disponible — requiere verificación manual")
+	}
 
-	log.Printf("[Worker-%d] ✅ AP [%d] %s. Dist: %.2f km | Azimut AP: %.2f° | Ángulo a Cliente: %.2f° | En Cono: %t",
-		workerID, i+1, ap.APName, distanciaKm, azimutFloat, bearingCliente, coberturaViable)
+	log.Printf("[Worker-%d] ✅ AP [%d] %s. Dist: %.2f km | Azimut AP: %.2f° (ok=%t) | Ángulo Cliente: %.2f° | Beamwidth: %.0f° | En Cono: %t",
+		workerID, i+1, ap.APName, distanciaKm, azimutFloat, azimutOK, bearingCliente, beamwidth, coberturaViable)
 
 	log.Printf("[Worker-%d] ✅ AP [%d] %s listo en %s. Cobertura: %t, Distancia: %.2f km", workerID, i+1, ap.APName, time.Since(startWorker).Round(time.Second), coberturaViable, distanciaKm)
 
