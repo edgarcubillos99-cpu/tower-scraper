@@ -12,7 +12,14 @@ COPY . .
 
 RUN CGO_ENABLED=1 GOOS=linux go build -o /usr/local/bin/tower-scraper cmd/scraper/main.go
 
-# Al no poner @version, Go usa inteligentemente la que esté en tu go.mod
+# --- FIX: Actualizar llaves GPG de Debian Bullseye ---
+# Esto evita el error de "invalid signature" al hacer apt-get update
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update --allow-insecure-repositories || true \
+    && apt-get install -y --allow-unauthenticated debian-archive-keyring \
+    && apt-get update
+# -----------------------------------------------------
+
 RUN go run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps
 
 EXPOSE 8080
