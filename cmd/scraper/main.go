@@ -19,6 +19,7 @@ import (
 
 	"tower-scraper/internal/config"
 	"tower-scraper/internal/db"
+	"tower-scraper/internal/mcpimage"
 	"tower-scraper/internal/models"
 	"tower-scraper/internal/scraper"
 )
@@ -83,6 +84,34 @@ func main() {
 			log.Printf("✅ Respuesta MCP enviada al agente (%d ubicaciones).", len(coords))
 		}
 		return mcp.NewToolResultText(string(resultJSON)), nil
+	})
+
+	mapsTool := mcp.NewTool("get_google_maps_screenshot",
+		mcp.WithDescription("Abre Google Maps en las coordenadas indicadas y devuelve una captura PNG. "+
+			"La respuesta incluye contenido tipo image (MCP); en n8n activa Convert to Binary en el nodo MCP Client."),
+		mcp.WithString("lat", mcp.Required(), mcp.Description("Latitud del punto a mostrar")),
+		mcp.WithString("lon", mcp.Required(), mcp.Description("Longitud del punto a mostrar")),
+	)
+
+	mcpServer.AddTool(mapsTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		_ = ctx
+		args := request.GetArguments()
+		lat, latOk := normalizeCoordArg(args["lat"])
+		lon, lonOk := normalizeCoordArg(args["lon"])
+		if !latOk || !lonOk {
+			return mcp.NewToolResultError("indica lat y lon"), nil
+		}
+
+		log.Printf("🗺️ MCP Google Maps -> Lat: %s, Lon: %s", lat, lon)
+
+		png, err := ts.ScreenshotGoogleMaps(lat, lon)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("fallo captura Google Maps: %v", err)), nil
+		}
+
+		caption := fmt.Sprintf("Google Maps en %s, %s", lat, lon)
+		log.Println("✅ Captura Google Maps enviada al agente.")
+		return mcpimage.PNGToolResult(caption, png), nil
 	})
 
 	// 4. Configuración del Transporte (Dual Mode: Stdio o SSE)

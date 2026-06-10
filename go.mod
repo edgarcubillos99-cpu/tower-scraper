@@ -2,6 +2,8 @@ module tower-scraper
 
 go 1.24.0
 
+toolchain go1.25.3
+
 require (
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/joho/godotenv v1.5.1
@@ -19,5 +21,4 @@ require (
 	github.com/gosnmp/gosnmp v1.43.2
 	github.com/spf13/cast v1.7.1 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	gocv.io/x/gocv v0.43.0
 )
