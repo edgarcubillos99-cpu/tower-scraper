@@ -1,0 +1,529 @@
+openapi: 3.0.3
+info:
+  title: Tower Coverage API
+  description: |
+    API REST del servicio TowerCoverage Scraper.
+
+    Disponible cuando el servicio corre con `MCP_TRANSPORT=sse` (modo HTTP).
+
+    - **Cobertura ligera**: solo datos del mapa TowerCoverage.
+    - **Cobertura completa**: mismo pipeline que la herramienta MCP `get_tower_coverage` (scraper + BD + SNMP).
+    - **Dispositivos AP** y **Torres**: consultas de solo lectura a MySQL.
+  version: 1.0.0
+  contact:
+    name: OSnet Wireless Team
+
+servers:
+  - url: /
+    description: Mismo host que sirve esta especificación (local, ngrok, proxy inverso)
+  - url: http://localhost:8080
+    description: Desarrollo local explícito
+
+tags:
+  - name: Cobertura
+    description: Consultas de cobertura vía TowerCoverage
+  - name: Dispositivos AP
+    description: Tabla `dispositivos_ap`
+  - name: Torres
+    description: Tabla `torres`
+  - name: SNMP
+    description: Consultas SNMP directas a APs
+
+paths:
+  /api/coverage:
+    post:
+      tags: [Cobertura]
+      summary: Cobertura ligera (solo mapa)
+      description: |
+        Navega al mapa de TowerCoverage con las coordenadas indicadas y devuelve
+        las torres visibles en el resultado. **No** consulta BD ni SNMP.
+      operationId: postCoverageLight
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CoverageLightRequest'
+            examples:
+              unPunto:
+                summary: Un punto
+                value:
+                  lat: "18.453518"
+                  lon: "-66.736353"
+      responses:
+        '200':
+          description: Lista de torres del mapa
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TowerCoverage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/coverage/full:
+    post:
+      tags: [Cobertura]
+      summary: Cobertura completa (MCP get_tower_coverage)
+      description: |
+        Ejecuta el pipeline completo: scraper TowerCoverage, cruce con `dispositivos_ap`,
+        verificación trigonométrica y lectura SNMP de capacidad.
+
+        Acepta un punto (`lat` + `lon`), un array en `locations`, o un array raíz
+        `[{ "lat": "...", "lon": "..." }]`. Varias ubicaciones se procesan en paralelo.
+      operationId: postCoverageFull
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/CoverageFullRequest'
+                - $ref: '#/components/schemas/CoverageLocationsRequest'
+                - type: array
+                  items:
+                    $ref: '#/components/schemas/Coord'
+            examples:
+              unPunto:
+                summary: Coordenada única
+                value:
+                  lat: "18.453518"
+                  lon: "-66.736353"
+              variasUbicaciones:
+                summary: Varias ubicaciones
+                value:
+                  locations:
+                    - lat: "18.453518"
+                      lon: "-66.736353"
+                    - lat: "18.40"
+                      lon: "-66.20"
+              arrayRaiz:
+                summary: Array raíz (n8n)
+                value:
+                  - lat: "18.453518"
+                    lon: "-66.736353"
+      responses:
+        '200':
+          description: Resultado de cobertura
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: array
+                    items:
+                      $ref: '#/components/schemas/RespuestaCobertura'
+                  - $ref: '#/components/schemas/CoverageBatchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/dispositivos-ap:
+    get:
+      tags: [Dispositivos AP]
+      summary: Listar o filtrar dispositivos AP
+      description: |
+        Consulta la tabla `dispositivos_ap`. Sin parámetros devuelve todos los registros.
+        Los filtros se combinan con AND.
+
+        - `id`, `disp_id`: coincidencia exacta.
+        - `torre_nombre`, `ap_name`: búsqueda parcial (LIKE).
+        - Resto de columnas: coincidencia exacta.
+      operationId: getDispositivosAP
+      parameters:
+        - $ref: '#/components/parameters/DispositivoAPId'
+        - $ref: '#/components/parameters/DispositivoAPDispId'
+        - $ref: '#/components/parameters/DispositivoAPTorreNombre'
+        - $ref: '#/components/parameters/DispositivoAPName'
+        - $ref: '#/components/parameters/DispositivoAPTipo'
+        - $ref: '#/components/parameters/DispositivoAPAzimut'
+        - $ref: '#/components/parameters/DispositivoAPTilt'
+        - $ref: '#/components/parameters/DispositivoAPAltura'
+        - $ref: '#/components/parameters/DispositivoAPIP'
+      responses:
+        '200':
+          description: Lista de dispositivos AP
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DispositivoAP'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /api/torres:
+    get:
+      tags: [Torres]
+      summary: Listar o filtrar torres
+      description: |
+        Consulta la tabla `torres`. Sin parámetros devuelve todos los registros.
+
+        - `id`: coincidencia exacta.
+        - `nombre`: búsqueda parcial (LIKE).
+        - `latitud`, `longitud`: coincidencia exacta.
+      operationId: getTorres
+      parameters:
+        - $ref: '#/components/parameters/TorreId'
+        - $ref: '#/components/parameters/TorreNombre'
+        - $ref: '#/components/parameters/TorreLatitud'
+        - $ref: '#/components/parameters/TorreLongitud'
+      responses:
+        '200':
+          description: Lista de torres
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Torre'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /api/snmp/status:
+    get:
+      tags: [SNMP]
+      summary: Consulta SNMP de un AP
+      description: |
+        Ejecuta una lectura SNMP de clientes conectados y capacidad sobre un AP.
+
+        Identifica el equipo por **una** de estas vías:
+
+        - `ip_address`: coincidencia exacta en `dispositivos_ap`.
+        - `ap_name`: búsqueda parcial por nombre; si hay varias torres con el mismo AP,
+          indica `torre_nombre` para desambiguar.
+
+        El `tipo` en query es opcional y sobrescribe el de la BD (útil si el inventario está desactualizado).
+
+        Requiere VPN/ruta hacia la red de gestión (`10.245.x.x`) igual que el pipeline de cobertura completa.
+      operationId: getSNMPStatus
+      parameters:
+        - $ref: '#/components/parameters/DispositivoAPIP'
+        - $ref: '#/components/parameters/DispositivoAPName'
+        - $ref: '#/components/parameters/DispositivoAPTorreNombre'
+        - $ref: '#/components/parameters/DispositivoAPTipo'
+      responses:
+        '200':
+          description: Resultado SNMP del AP
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SNMPStatus'
+              examples:
+                conEspacio:
+                  summary: AP con capacidad disponible
+                  value:
+                    ap_name: OSNAPSEC-5
+                    torre_nombre: Corcobada
+                    tipo_de_antena: ePMP3000L
+                    ip_address: 10.245.194.6
+                    clientes_conectados: 6
+                    esta_saturado: false
+                    estado_capacidad: Con espacio
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: Dispositivo no encontrado en BD
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Nombre de AP ambiguo (varias torres)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  parameters:
+    DispositivoAPId:
+      name: id
+      in: query
+      description: ID del registro
+      schema:
+        type: integer
+        example: 12
+    DispositivoAPDispId:
+      name: disp_id
+      in: query
+      description: ID del dispositivo en inventario
+      schema:
+        type: integer
+        example: 5
+    DispositivoAPTorreNombre:
+      name: torre_nombre
+      in: query
+      description: Nombre de torre (búsqueda parcial)
+      schema:
+        type: string
+        example: Arecibo
+    DispositivoAPName:
+      name: ap_name
+      in: query
+      description: Nombre del AP (búsqueda parcial)
+      schema:
+        type: string
+        example: Sector-Norte
+    DispositivoAPTipo:
+      name: tipo
+      in: query
+      schema:
+        type: string
+        example: ubiquiti
+    DispositivoAPAzimut:
+      name: azimut
+      in: query
+      schema:
+        type: string
+        example: "180"
+    DispositivoAPTilt:
+      name: tilt
+      in: query
+      schema:
+        type: string
+        example: "5"
+    DispositivoAPAltura:
+      name: altura
+      in: query
+      schema:
+        type: string
+        example: "30"
+    DispositivoAPIP:
+      name: ip_address
+      in: query
+      schema:
+        type: string
+        example: 10.0.0.1
+    TorreId:
+      name: id
+      in: query
+      schema:
+        type: integer
+        example: 3
+    TorreNombre:
+      name: nombre
+      in: query
+      description: Nombre de torre (búsqueda parcial)
+      schema:
+        type: string
+        example: OSN
+    TorreLatitud:
+      name: latitud
+      in: query
+      description: Latitud de la torre (coincidencia exacta)
+      schema:
+        type: string
+        example: "18.4727"
+    TorreLongitud:
+      name: longitud
+      in: query
+      description: Longitud de la torre (coincidencia exacta)
+      schema:
+        type: string
+        example: "-66.7602"
+
+  responses:
+    BadRequest:
+      description: Petición inválida
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    MethodNotAllowed:
+      description: Método HTTP no permitido
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: Error interno del servidor
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: JSON inválido
+
+    Coord:
+      type: object
+      required: [lat, lon]
+      properties:
+        lat:
+          type: string
+          example: "18.453518"
+        lon:
+          type: string
+          example: "-66.736353"
+
+    CoverageLightRequest:
+      type: object
+      required: [lat, lon]
+      properties:
+        lat:
+          type: string
+        lon:
+          type: string
+
+    CoverageFullRequest:
+      type: object
+      required: [lat, lon]
+      properties:
+        lat:
+          type: string
+        lon:
+          type: string
+
+    CoverageLocationsRequest:
+      type: object
+      required: [locations]
+      properties:
+        locations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Coord'
+
+    CoverageBatchResponse:
+      type: object
+      properties:
+        consultas:
+          type: array
+          items:
+            $ref: '#/components/schemas/CoverageBatchItem'
+
+    CoverageBatchItem:
+      type: object
+      properties:
+        lat:
+          type: string
+        lon:
+          type: string
+        resultados:
+          type: array
+          items:
+            $ref: '#/components/schemas/RespuestaCobertura'
+        error:
+          type: string
+          description: Presente si falló esa ubicación
+
+    TowerCoverage:
+      type: object
+      properties:
+        TowerName:
+          type: string
+        Latitude:
+          type: string
+        Longitude:
+          type: string
+        Alignment:
+          type: string
+        Tilt:
+          type: string
+        Distance:
+          type: string
+        Signal:
+          type: string
+        Status:
+          type: string
+
+    RespuestaCobertura:
+      type: object
+      properties:
+        antena:
+          type: string
+        tipo_de_antena:
+          type: string
+        distancia_entre_antena_y_cliente_km:
+          type: number
+          format: double
+        cliente_con_cobertura:
+          type: boolean
+        nombre_torre:
+          type: string
+        clientes_conectados:
+          type: integer
+          nullable: true
+        esta_saturado:
+          type: boolean
+          nullable: true
+        estado_capacidad:
+          type: string
+
+    DispositivoAP:
+      type: object
+      properties:
+        id:
+          type: integer
+        disp_id:
+          type: integer
+          nullable: true
+        torre_nombre:
+          type: string
+        ap_name:
+          type: string
+        tipo:
+          type: string
+        azimut:
+          type: string
+        tilt:
+          type: string
+        altura:
+          type: string
+        ip_address:
+          type: string
+
+    SNMPStatus:
+      type: object
+      properties:
+        ap_name:
+          type: string
+        torre_nombre:
+          type: string
+        tipo_de_antena:
+          type: string
+        ip_address:
+          type: string
+        clientes_conectados:
+          type: integer
+        esta_saturado:
+          type: boolean
+          nullable: true
+        estado_capacidad:
+          type: string
+          description: Con espacio, Saturado, o mensaje de error SNMP
+
+    Torre:
+      type: object
+      properties:
+        id:
+          type: integer
+        nombre:
+          type: string
+        latitud:
+          type: string
+          example: "18.4727"
+        longitud:
+          type: string
+          example: "-66.7602"

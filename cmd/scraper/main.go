@@ -6,21 +6,20 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"tower-scraper/internal/api"
 	"tower-scraper/internal/config"
+	"tower-scraper/internal/coverage"
 	"tower-scraper/internal/db"
 	"tower-scraper/internal/mcpimage"
-	"tower-scraper/internal/models"
 	"tower-scraper/internal/scraper"
 )
 
@@ -73,7 +72,7 @@ func main() {
 			log.Printf("🤖 MCP Request -> %d ubicaciones en paralelo", len(coords))
 		}
 
-		resultJSON, err := marshalCoberturaConsultas(ts, dbClient, coords)
+		resultJSON, err := coverage.RunConsultas(ts, dbClient, toCoverageCoords(coords))
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Fallo consulta cobertura: %v", err)), nil
 		}
@@ -132,69 +131,18 @@ func main() {
 		http.Handle("/sse", mcpBearerAuth(cfg.MCPAPIKey, sseServer.SSEHandler()))
 		http.Handle("/message", mcpBearerAuth(cfg.MCPAPIKey, sseServer.MessageHandler()))
 
-		// Endpoint REST: solo torres del mapa (ligero)
-		http.HandleFunc("/api/coverage", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				http.Error(w, "Método no permitido. Usa POST", http.StatusMethodNotAllowed)
-				return
-			}
-
-			var reqBody struct {
-				Lat string `json:"lat"`
-				Lon string `json:"lon"`
-			}
-
-			if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
-				http.Error(w, "JSON inválido", http.StatusBadRequest)
-				return
-			}
-
-			torres, err := ts.GetTowersData(reqBody.Lat, reqBody.Lon)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("Error obteniendo datos: %v", err), http.StatusInternalServerError)
-				return
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(torres)
+		api.Register(&api.Handler{
+			Scraper: ts,
+			DB:      dbClient,
+			ParseCoords: func(raw any) ([]coverage.Coord, error) {
+				pairs, err := coordsFromAnyRoot(raw)
+				if err != nil {
+					return nil, err
+				}
+				return toCoverageCoords(pairs), nil
+			},
 		})
-
-		// Pipeline completo (BD, trig, SNMP) — útil para n8n con HTTP Request
-		http.HandleFunc("/api/coverage/full", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				http.Error(w, "Método no permitido. Usa POST", http.StatusMethodNotAllowed)
-				return
-			}
-
-			bodyBytes, err := io.ReadAll(r.Body)
-			if err != nil {
-				http.Error(w, "No se pudo leer el cuerpo", http.StatusBadRequest)
-				return
-			}
-
-			dec := json.NewDecoder(bytes.NewReader(bodyBytes))
-			dec.UseNumber()
-			var raw any
-			if err := dec.Decode(&raw); err != nil {
-				http.Error(w, fmt.Sprintf("JSON inválido: %v", err), http.StatusBadRequest)
-				return
-			}
-
-			coords, err := coordsFromAnyRoot(raw)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-
-			payload, err := marshalCoberturaConsultas(ts, dbClient, coords)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("Fallo consulta cobertura: %v", err), http.StatusInternalServerError)
-				return
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(payload)
-		})
+		log.Printf("📖 Documentación Swagger: http://localhost:%s/swagger/", cfg.AppPort)
 
 		addr := fmt.Sprintf(":%s", cfg.AppPort)
 		if err := http.ListenAndServe(addr, nil); err != nil {
@@ -445,78 +393,10 @@ func coerceToString(v any) string {
 	}
 }
 
-type consultaBloque struct {
-	Lat        string                 `json:"lat"`
-	Lon        string                 `json:"lon"`
-	Resultados []models.RespuestaMCP  `json:"resultados"`
-	Error      string                 `json:"error,omitempty"`
-}
-
-func marshalCoberturaConsultas(ts *scraper.TowerScraper, dbClient *db.DBClient, coords []coordPair) ([]byte, error) {
-	if len(coords) == 0 {
-		return nil, fmt.Errorf("sin coordenadas")
+func toCoverageCoords(pairs []coordPair) []coverage.Coord {
+	out := make([]coverage.Coord, len(pairs))
+	for i, c := range pairs {
+		out[i] = coverage.Coord{Lat: c.lat, Lon: c.lon}
 	}
-	if len(coords) == 1 {
-		res, err := ejecutarCoberturaParaCoordenada(ts, dbClient, coords[0].lat, coords[0].lon)
-		if err != nil {
-			return nil, err
-		}
-		return json.MarshalIndent(res, "", "  ")
-	}
-
-	out := make([]consultaBloque, len(coords))
-	var wg sync.WaitGroup
-	for i, c := range coords {
-		wg.Add(1)
-		go func(i int, lat, lon string) {
-			defer wg.Done()
-			res, err := ejecutarCoberturaParaCoordenada(ts, dbClient, lat, lon)
-			out[i].Lat, out[i].Lon = lat, lon
-			if err != nil {
-				out[i].Error = err.Error()
-				return
-			}
-			out[i].Resultados = res
-		}(i, c.lat, c.lon)
-	}
-	wg.Wait()
-
-	wrapped := struct {
-		Consultas []consultaBloque `json:"consultas"`
-	}{Consultas: out}
-	return json.MarshalIndent(wrapped, "", "  ")
-}
-
-func ejecutarCoberturaParaCoordenada(ts *scraper.TowerScraper, dbClient *db.DBClient, lat, lon string) ([]models.RespuestaMCP, error) {
-	torres, err := ts.GetTowersData(lat, lon)
-	if err != nil {
-		return nil, err
-	}
-
-	var resultadosFinales []models.RespuestaMCP
-
-	for _, torre := range torres {
-		log.Printf("Buscando APs en BD para la torre encontrada: %s", torre.TowerName)
-
-		aps, err := dbClient.ObtenerAPsPorTorre(torre.TowerName)
-		if err != nil {
-			log.Printf("Error BD con torre %s: %v", torre.TowerName, err)
-			continue
-		}
-
-		if len(aps) > 0 {
-			log.Printf("Se encontraron %d APs en DB para %s. Entrando a verificar...", len(aps), torre.TowerName)
-
-			apsAnalizados, errTest := ts.TestAPCoverage(torre, aps, lat, lon)
-			if errTest != nil {
-				log.Printf("Fallo en la prueba de cobertura para %s: %v", torre.TowerName, errTest)
-			}
-
-			resultadosFinales = append(resultadosFinales, apsAnalizados...)
-		} else {
-			log.Printf("No hay APs configurados en DB para la torre %s", torre.TowerName)
-		}
-	}
-
-	return resultadosFinales, nil
+	return out
 }

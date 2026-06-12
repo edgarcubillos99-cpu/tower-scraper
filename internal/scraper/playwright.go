@@ -495,7 +495,6 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 		if azimuthLimpio != "" {
 			if !ensureAzimuthCommitted(page, workerID, ap.APName, azimuthLimpio) {
 				log.Printf("[Worker-%d] azimut no confirmado para %s (esperado %q); se omite #showFilter", workerID, ap.APName, azimuthLimpio)
-				respuestaBase.Torre.Status = "Azimut no confirmado; RF omitido"
 
 				rutaError := fmt.Sprintf("./capturas/%s_AP_%d_%s_error.png", safeName, i, ap.APName)
 				if _, err := page.Screenshot(playwright.PageScreenshotOptions{
@@ -580,15 +579,11 @@ func (s *TowerScraper) processSingleAP(workerID int, towerURL, safeName string, 
 
 	log.Printf("[Worker-%d] ✅ AP [%d] %s listo en %s. Cobertura: %t, Distancia: %.2f km", workerID, i+1, ap.APName, time.Since(startWorker).Round(time.Second), coberturaViable, distanciaKm)
 
+	_ = alignExtraido
+	_ = statusExtraido
+
 	// E. Retornar JSON plano para el agente IA
 	out := models.RespuestaMCP{
-		Torre: models.DatosTorre{
-			Align:    alignExtraido, // Viene directo del objeto torre
-			Tilt:     ap.Tilt,       // Viene directo de la base de datos
-			Status:   statusExtraido,
-			Latitud:  latTorreFloat,
-			Longitud: lonTorreFloat,
-		},
 		Antena:      ap.APName,
 		Tipo:        ap.Tipo,
 		Distancia:   distanciaKm,
