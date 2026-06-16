@@ -28,9 +28,14 @@ type TowerScraper struct {
 	pw      *playwright.Playwright
 	browser playwright.Browser
 	context playwright.BrowserContext
+	tcUser  string
+	tcPass  string
+	sessionStarted time.Time
 	// pwMu serializa el uso del BrowserContext entre peticiones HTTP/MCP concurrentes
 	// (varias pestañas en la misma request siguen en paralelo dentro de TestAPCoverage).
 	pwMu sync.Mutex
+	// loginMu protege login/renovación y el reemplazo del BrowserContext.
+	loginMu sync.Mutex
 }
 
 // NewTowerScraper inicializa Playwright y el navegador.
@@ -58,71 +63,14 @@ func NewTowerScraper() (*TowerScraper, error) {
 
 // Login maneja la autenticación y guarda la sesión.
 func (s *TowerScraper) Login(username, password string) error {
+	s.tcUser = username
+	s.tcPass = password
+	s.pwMu.Lock()
+	defer s.pwMu.Unlock()
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
 	log.Println("Iniciando proceso de Login...")
-
-	// Creamos un nuevo contexto
-	context, err := s.browser.NewContext()
-	if err != nil {
-		log.Printf("[Login] fallo al crear contexto del navegador: %v", err)
-		return err
-	}
-	s.context = context
-
-	page, err := context.NewPage()
-	if err != nil {
-		log.Printf("[Login] fallo al abrir pestaña de login: %v", err)
-		return err
-	}
-	defer page.Close() // Cerramos esta pestaña al terminar el login
-
-	// 1. Navegar a la página de login
-	loginURL := "https://www.towercoverage.com/Login"
-	if _, err = page.Goto(loginURL); err != nil {
-		log.Printf("[Login] fallo al navegar a la URL de login: %v", err)
-		return fmt.Errorf("error navegando al login: %v", err)
-	}
-
-	// 2. Llenar el formulario
-	if err := page.Locator("#UserName").Fill(username); err != nil {
-		log.Printf("[Login] fallo al rellenar usuario: %v", err)
-		return fmt.Errorf("error llenando username: %v", err)
-	}
-	if err := page.Locator("#Password").Fill(password); err != nil {
-		log.Printf("[Login] fallo al rellenar contraseña: %v", err)
-		return fmt.Errorf("error llenando password: %v", err)
-	}
-
-	// 3. Hacer clic en el botón de login y esperar a que la red se estabilice
-	loginBtn := page.Locator(`input[type="submit"][value="Login"]`)
-	if err := loginBtn.Click(); err != nil {
-		log.Printf("[Login] fallo al hacer clic en el botón Login: %v", err)
-		page.Screenshot(playwright.PageScreenshotOptions{
-			Path: playwright.String("error_login_click.png"),
-		})
-		return fmt.Errorf("error haciendo click en el botón Login: %v", err)
-	}
-
-	// Esperamos a que la página cargue completamente después del login
-	signOutBtn := page.GetByText("Sign Out", playwright.PageGetByTextOptions{Exact: playwright.Bool(true)})
-	if err := signOutBtn.WaitFor(playwright.LocatorWaitForOptions{
-		State: playwright.WaitForSelectorStateVisible,
-	}); err != nil {
-		log.Printf("[Login] fallo esperando texto \"Sign Out\" (timeout o no visible): %v", err)
-		//page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String("error_timeout_login.png")})
-		return fmt.Errorf("el dashboard no cargó a tiempo tras el login: %v", err)
-	}
-
-	// 4. Validar el éxito
-	if page.URL() == loginURL {
-		log.Printf("[Login] fallo de validación: seguimos en la URL de login (credenciales incorrectas o error del servidor)")
-		page.Screenshot(playwright.PageScreenshotOptions{
-			Path: playwright.String("error_credenciales.png"),
-		})
-		return fmt.Errorf("login fallido: posibles credenciales incorrectas, seguimos en la pantalla de login")
-	}
-
-	log.Println("Login exitoso. Sesión guardada en el contexto.")
-	return nil
+	return s.loginUnderLock()
 }
 
 // GetTowersData navega a la URL del mapa inyectando latitud y longitud.
@@ -130,41 +78,77 @@ func (s *TowerScraper) GetTowersData(lat, lon string) ([]models.TowerCoverage, e
 	s.pwMu.Lock()
 	defer s.pwMu.Unlock()
 
+	if err := s.ensureSessionUnderPWLock(); err != nil {
+		return nil, fmt.Errorf("sesión TowerCoverage: %w", err)
+	}
+
+	results, sessionExpired, err := s.getTowersDataOnce(lat, lon)
+	if sessionExpired || err != nil {
+		if sessionExpired || sessionExpiredOnPageError(err) {
+			log.Println("Sesión TowerCoverage inválida o expirada; renovando y reintentando...")
+			if renewErr := s.renewSessionUnderPWLock(); renewErr != nil {
+				return nil, fmt.Errorf("renovación de sesión: %w", renewErr)
+			}
+			results, _, err = s.getTowersDataOnce(lat, lon)
+		}
+	}
+	return results, err
+}
+
+func (s *TowerScraper) getTowersDataOnce(lat, lon string) ([]models.TowerCoverage, bool, error) {
 	log.Printf("Consultando cobertura para Lat: %s, Lon: %s...", lat, lon)
 
 	page, err := s.context.NewPage()
 	if err != nil {
 		log.Printf("[GetTowersData] fallo al crear página: %v", err)
-		return nil, fmt.Errorf("error creando nueva página: %v", err)
+		return nil, false, fmt.Errorf("error creando nueva página: %v", err)
 	}
 	defer page.Close()
 
 	targetURL := fmt.Sprintf("https://www.towercoverage.com/En-US/Dashboard/LinkPathResult/31710?Lat=%s&Lon=%s&cHgt=0", lat, lon)
 
-	// Aumentamos el tiempo de espera de navegación a 60s
 	if _, err = page.Goto(targetURL, playwright.PageGotoOptions{
 		Timeout: playwright.Float(60000),
 	}); err != nil {
 		log.Printf("[GetTowersData] fallo al navegar al mapa (Lat=%s Lon=%s): %v", lat, lon, err)
-		return nil, fmt.Errorf("error navegando al mapa de cobertura: %v", err)
+		return nil, false, fmt.Errorf("error navegando al mapa de cobertura: %v", err)
+	}
+
+	if sessionExpiredOnPage(page) {
+		log.Printf("[GetTowersData] redirigido a login tras navegar al mapa (Lat=%s Lon=%s)", lat, lon)
+		return nil, true, nil
 	}
 
 	log.Println("URL alcanzada, esperando a que el mapa se inicialice...")
 
 	searchBox := page.Locator("input[placeholder*='Address']")
-
 	if err := searchBox.WaitFor(playwright.LocatorWaitForOptions{
 		State:   playwright.WaitForSelectorStateVisible,
 		Timeout: playwright.Float(45000),
 	}); err != nil {
+		if sessionExpiredOnPage(page) {
+			log.Printf("[GetTowersData] sesión expirada esperando el mapa (Lat=%s Lon=%s)", lat, lon)
+			return nil, true, nil
+		}
 		log.Printf("[GetTowersData] fallo esperando el buscador del mapa (input Address): %v", err)
-		page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String("debug_mapa_failed.png")})
-		return nil, fmt.Errorf("la interfaz del mapa no cargó. Revisa debug_mapa_failed.png: %v", err)
+		_, _ = page.Screenshot(playwright.PageScreenshotOptions{Path: playwright.String("debug_mapa_failed.png")})
+		return nil, false, fmt.Errorf("la interfaz del mapa no cargó. Revisa debug_mapa_failed.png: %v", err)
 	}
 
 	page.WaitForTimeout(3000)
 	log.Println("Mapa cargado. Iniciando extracción de datos...")
-	return s.ExtractCoverageData(page)
+	results, err := s.ExtractCoverageData(page)
+	return results, false, err
+}
+
+func sessionExpiredOnPageError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "login") ||
+		strings.Contains(msg, "sesión") ||
+		strings.Contains(msg, "session")
 }
 
 // ExtractCoverageData itera sobre los resultados, extrae la información y filtra por distancia.
@@ -299,6 +283,9 @@ func (s *TowerScraper) TestAPCoverage(torre models.TowerCoverage, aps []db.APInf
 	if !skipRFConeWebRender {
 		s.pwMu.Lock()
 		defer s.pwMu.Unlock()
+		if err := s.ensureSessionUnderPWLock(); err != nil {
+			return nil, fmt.Errorf("sesión TowerCoverage: %w", err)
+		}
 	}
 
 	towerName := torre.TowerName

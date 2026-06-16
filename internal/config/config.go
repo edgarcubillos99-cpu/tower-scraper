@@ -30,6 +30,8 @@ type Config struct {
 	Password  string
 	AppPort   string
 	MCPAPIKey string // Si no está vacía, /sse y /message exigen Authorization: Bearer <valor>
+	APIUser   string // Si APIUser y APIPass están definidos, /api/* exige Basic Auth
+	APIPass   string
 	DBHost    string
 	DBPort    string // vacío se interpreta como 3306 en db.NewDBClient
 	DBUser    string
@@ -58,6 +60,8 @@ func LoadConfig() *Config {
 		Password:  password,
 		AppPort:   appPort,
 		MCPAPIKey: os.Getenv("MCP_API_KEY"),
+		APIUser:   os.Getenv("API_USERNAME"),
+		APIPass:   os.Getenv("API_PASSWORD"),
 		DBHost:    dbHost,
 		DBPort:    dbPort,
 		DBUser:    dbUser,
