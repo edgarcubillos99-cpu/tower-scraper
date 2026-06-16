@@ -20,10 +20,20 @@ RUN apt-get update --allow-insecure-repositories || true \
     && apt-get update
 # -----------------------------------------------------
 
-RUN go run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps
+# Solo Chromium (no Firefox/WebKit) + reintentos ante timeouts de apt en redes lentas.
+RUN set -eux; \
+    for attempt in 1 2 3 4 5; do \
+      apt-get update --fix-missing || true; \
+      if go run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps chromium; then \
+        exit 0; \
+      fi; \
+      echo "playwright install: reintento ${attempt}/5 en 30s..."; \
+      sleep 30; \
+    done; \
+    exit 1
 
-EXPOSE 8080
+EXPOSE ${APP_PORT}
 ENV MCP_TRANSPORT=sse
-ENV APP_PORT=8080
+ENV APP_PORT=${APP_PORT}
 
 CMD ["tower-scraper"]

@@ -8,8 +8,13 @@ import (
 	"github.com/playwright-community/playwright-go"
 )
 
-const googleMapsViewportW = 1280
-const googleMapsViewportH = 900
+const (
+	googleMapsViewportW = 1400
+	googleMapsViewportH = 900
+	googleMapsZoom      = 20 // zoom en la URL (fiable); sin rueda ni botones Acercar
+)
+
+const googleMapsUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
 // ScreenshotGoogleMaps abre Google Maps en la coordenada indicada y devuelve un PNG en memoria.
 func (s *TowerScraper) ScreenshotGoogleMaps(lat, lon string) ([]byte, error) {
@@ -29,7 +34,8 @@ func (s *TowerScraper) ScreenshotGoogleMaps(lat, lon string) ([]byte, error) {
 			Width:  googleMapsViewportW,
 			Height: googleMapsViewportH,
 		},
-		Locale: playwright.String("es"),
+		Locale:    playwright.String("es"),
+		UserAgent: playwright.String(googleMapsUserAgent),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("no se pudo crear contexto para Google Maps: %w", err)
@@ -42,13 +48,10 @@ func (s *TowerScraper) ScreenshotGoogleMaps(lat, lon string) ([]byte, error) {
 	}
 	defer page.Close()
 
-	// data=!3m1!1e3 fuerza vista satélite; el marcador queda en lat,lon.
-	mapURL := fmt.Sprintf(
-		"https://www.google.com/maps/place/%s,%s/@%s,%s,17z/data=!3m1!1e3",
-		lat, lon, lat, lon,
-	)
+	mapURL := googleMapsCoordsURL(lat, lon, googleMapsZoom)
 	if _, err = page.Goto(mapURL, playwright.PageGotoOptions{
-		Timeout: playwright.Float(60000),
+		Timeout:   playwright.Float(60000),
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
 	}); err != nil {
 		return nil, fmt.Errorf("error navegando a Google Maps: %w", err)
 	}
@@ -64,8 +67,22 @@ func (s *TowerScraper) ScreenshotGoogleMaps(lat, lon string) ([]byte, error) {
 	}
 
 	enableGoogleMapsSatellite(page)
+	page.WaitForTimeout(2000)
 
-	// Las teselas satélite tardan más que el mapa vectorial.
+	collapseGoogleMapsSidebar(page)
+	page.WaitForTimeout(1000)
+
+	// Tras cerrar el panel, recargar la misma URL recentra el pin en lat,lon con el zoom pedido.
+	if _, err = page.Goto(mapURL, playwright.PageGotoOptions{
+		Timeout:   playwright.Float(45000),
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
+	}); err != nil {
+		return nil, fmt.Errorf("error recentrando mapa: %w", err)
+	}
+	_ = mapCanvas.WaitFor(playwright.LocatorWaitForOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(30000),
+	})
 	page.WaitForTimeout(4000)
 
 	png, err := page.Screenshot(playwright.PageScreenshotOptions{
@@ -78,6 +95,35 @@ func (s *TowerScraper) ScreenshotGoogleMaps(lat, lon string) ([]byte, error) {
 
 	log.Printf("Captura de Google Maps lista (%d bytes).", len(png))
 	return png, nil
+}
+
+// googleMapsCoordsURL: /place/ + @lat,lon,zoom mantiene el pin rojo centrado en la coordenada.
+func googleMapsCoordsURL(lat, lon string, zoom int) string {
+	return fmt.Sprintf(
+		"https://www.google.com/maps/place/%s,%s/@%s,%s,%dz/data=!3m1!1e3",
+		lat, lon, lat, lon, zoom,
+	)
+}
+
+func collapseGoogleMapsSidebar(page playwright.Page) {
+	selectors := []string{
+		`button[aria-label="Contraer panel lateral"]`,
+		`button[aria-label="Collapse side panel"]`,
+		`button[aria-label*="Contraer panel"]`,
+		`button[aria-label*="Collapse side"]`,
+		`button[jsaction*="pane.close"]`,
+		`button[jsaction*="drawer.close"]`,
+	}
+	for _, sel := range selectors {
+		btn := page.Locator(sel).First()
+		if visible, _ := btn.IsVisible(); !visible {
+			continue
+		}
+		if err := btn.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)}); err == nil {
+			log.Println("Panel lateral de Google Maps contraído.")
+			return
+		}
+	}
 }
 
 func enableGoogleMapsSatellite(page playwright.Page) {
