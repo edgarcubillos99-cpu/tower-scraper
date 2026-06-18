@@ -67,12 +67,14 @@ func NewDBClient(cfg *config.Config) (*DBClient, error) {
 func (c *DBClient) ObtenerAPsPorTorre(nombreTorreTC string) ([]APInfo, error) {
 	nombreLimpio := strings.ReplaceAll(nombreTorreTC, "OSN.", "")
 	nombreLimpio = strings.TrimSpace(nombreLimpio)
+
+	// CAMBIO 1: Reemplazar 'LIKE' por '=' en la consulta SQL
 	query := `SELECT a.ap_name, a.azimut, a.tilt, a.altura, a.tipo, a.ip_address
           FROM dispositivos_ap a 
-          WHERE a.torre_nombre LIKE ?`
+          WHERE a.torre_nombre = ?`
 
-	// El % permite coincidencias parciales (ej: "OSN.Torre Principal" coincidirá con "Torre Principal")
-	searchParam := "%" + nombreLimpio + "%"
+	// CAMBIO 2: Quitar los comodines "%" para hacer una búsqueda exacta
+	searchParam := nombreLimpio
 
 	rows, err := c.conn.Query(query, searchParam)
 	if err != nil {
